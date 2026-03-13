@@ -539,3 +539,10 @@ def generate_report(year, month):
     exe('INSERT INTO reports (empresa_id, year, month, content, income, expenses, created_at) VALUES (?,?,?,?,?,?,datetime("now"))',
         [eid, year, month, texto, ingresos, gastos])
     return jsonify({'ok': True, 'content': texto})
+
+@app.route('/api/reports/all', methods=['DELETE'])
+@login_required
+def delete_all_reports():
+    eid = get_first_empresa(session['user_id'])
+    exe('DELETE FROM reports WHERE empresa_id=?', [eid])
+    return jsonify({'ok': True})
