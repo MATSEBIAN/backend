@@ -537,7 +537,7 @@ def upload_transaction():
     exe(
         "INSERT INTO transactions (empresa_id,type,amount,tax_amount,description,vendor_client,transaction_date,payment_method,source,cif_proveedor,num_factura,local,acreedor) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         [empresa_id, tx_type, parsed.get('importe_total', parsed.get('importe',0)), parsed.get('iva',0),
-         parsed.get('proveedor','Factura'), parsed.get('proveedor',''), parsed.get('fecha', str(datetime.date.today())), 'cash', 'ocr',
+         request.form.get('filename') or parsed.get('proveedor','Factura'), parsed.get('proveedor',''), parsed.get('fecha', str(datetime.date.today())), 'cash', 'ocr',
          parsed.get('cif_proveedor',''), parsed.get('num_factura',''), parsed.get('local','Madrid'), parsed.get('acreedor','Sabores Adelitas SL')]
     )
     return jsonify({'ok': True, 'parsed': parsed})
