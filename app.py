@@ -326,6 +326,8 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_f_emp ON facturas(empresa_id);
         CREATE INDEX IF NOT EXISTS idx_f_fecha ON facturas(fecha);
         CREATE INDEX IF NOT EXISTS idx_f_local ON facturas(local_id);
+        CREATE TABLE IF NOT EXISTS transactions(id INTEGER PRIMARY KEY AUTOINCREMENT, empresa_id INTEGER NOT NULL REFERENCES empresas(id), type TEXT NOT NULL DEFAULT 'expense', amount REAL NOT NULL DEFAULT 0, description TEXT, payment_method TEXT DEFAULT 'cash', transaction_date TEXT NOT NULL, category_id INTEGER, vendor_client TEXT, tax_amount REAL DEFAULT 0, notes TEXT, source TEXT DEFAULT 'manual', created_at TEXT DEFAULT(datetime('now')));
+        CREATE TABLE IF NOT EXISTS transaction_categories(id INTEGER PRIMARY KEY AUTOINCREMENT, empresa_id INTEGER NOT NULL REFERENCES empresas(id), name TEXT NOT NULL, type TEXT DEFAULT 'both', activo INTEGER DEFAULT 1);
     ''')
     if db.execute('SELECT COUNT(*) FROM usuarios').fetchone()[0] == 0:
         pw = generate_password_hash('admin123')
@@ -339,6 +341,71 @@ def init_db():
         db.execute("INSERT INTO usuarios_empresas(usuario_id,empresa_id,permisos) VALUES(1,2,'admin')")
         db.commit(); print('✅ DB initialized with seed data')
     db.close()
+
+
+# TRANSACTIONS API
+def get_first_empresa(uid):
+    e = qry('SELECT empresa_id FROM usuarios_empresas WHERE usuario_id=? LIMIT 1', [uid], one=True)
+    return e['empresa_id'] if e else None
+
+@app.route('/api/transactions/')
+@login_required
+def list_transactions():
+    eid = get_first_empresa(session['user_id'])
+    if not eid: return jsonify([])
+    d = request.args
+    sql = "SELECT t.*, tc.name as category FROM transactions t LEFT JOIN transaction_categories tc ON t.category_id=tc.id WHERE t.empresa_id=?"
+    args = [eid]
+    if d.get('type'):  sql += ' AND t.type=?';  args.append(d['type'])
+    if d.get('month'): sql += " AND strftime('%m', t.transaction_date)=?"; args.append(str(d['month']).zfill(2))
+    if d.get('year'):  sql += " AND strftime('%Y', t.transaction_date)=?"; args.append(str(d['year']))
+    sql += ' ORDER BY t.transaction_date DESC, t.id DESC'
+    return jsonify(qry(sql, args))
+
+@app.route('/api/transactions/manual', methods=['POST'])
+@login_required
+def create_transaction():
+    eid = get_first_empresa(session['user_id'])
+    if not eid: return jsonify({'error': 'Sin empresa'}), 400
+    d = request.get_json()
+    if not d or not d.get('amount') or not d.get('description'):
+        return jsonify({'error': 'Faltan campos obligatorios'}), 400
+    exe("""INSERT INTO transactions(empresa_id,type,amount,description,payment_method,transaction_date,category_id,vendor_client,tax_amount,notes,source) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+        [eid, d.get('type','expense'), float(d['amount']), d['description'],
+         d.get('payment_method','cash'), d.get('transaction_date', str(datetime.date.today())),
+         d.get('category_id'), d.get('vendor_client',''), float(d.get('tax_amount') or 0),
+         d.get('notes',''), 'manual'])
+    return jsonify({'ok': True}), 201
+
+@app.route('/api/transactions/<int:tid>', methods=['DELETE'])
+@login_required
+def delete_transaction(tid):
+    eid = get_first_empresa(session['user_id'])
+    exe('DELETE FROM transactions WHERE id=? AND empresa_id=?', [tid, eid])
+    return jsonify({'ok': True})
+
+@app.route('/api/transactions/categories')
+@login_required
+def list_tx_categories():
+    eid = get_first_empresa(session['user_id'])
+    return jsonify(qry('SELECT * FROM transaction_categories WHERE empresa_id=? AND activo=1', [eid]))
+
+@app.route('/api/transactions/categories', methods=['POST'])
+@login_required
+def create_tx_category():
+    eid = get_first_empresa(session['user_id'])
+    d = request.get_json()
+    exe('INSERT INTO transaction_categories(empresa_id,name,type) VALUES(?,?,?)',
+        [eid, d['name'], d.get('type','both')])
+    return jsonify({'ok': True}), 201
+
+@app.route('/api/dashboard/')
+@login_required
+def dashboard_frontend():
+    eid = get_first_empresa(session['user_id'])
+    if not eid: return jsonify({})
+    return dashboard(eid)
+
 
 init_db()
 
