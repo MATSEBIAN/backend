@@ -538,7 +538,7 @@ def generate_report(year, month):
     texto = msg.content[0].text
     exe('INSERT INTO reports (empresa_id, year, month, content, income, expenses, created_at) VALUES (?,?,?,?,?,?,datetime("now"))',
         [eid, year, month, texto, ingresos, gastos])
-    return jsonify({'ok': True, 'content': texto})
+    return jsonify({'ok': True, 'content': texto, 'income': ingresos, 'expenses': gastos, 'month': month, 'year': year, 'created_at': ''})
 
 @app.route('/api/reports/all', methods=['DELETE'])
 @login_required
