@@ -61,7 +61,15 @@ def opts(p): return '', 204
 def login_required(f):
     @wraps(f)
     def d(*a, **k):
-        if 'user_id' not in session: return jsonify({'error': 'No autorizado'}), 401
+        auth = request.headers.get('Authorization', '')
+        if auth.startswith('Bearer '):
+            try:
+                payload = pyjwt.decode(auth[7:], JWT_SECRET, algorithms=['HS256'])
+                session['user_id'] = payload['user_id']
+            except Exception:
+                return jsonify({'error': 'Token invalido'}), 401
+        elif 'user_id' not in session:
+            return jsonify({'msg': 'Missing Authorization Header'}), 401
         return f(*a, **k)
     return d
 
