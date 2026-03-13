@@ -423,6 +423,49 @@ def dashboard_frontend():
 
 init_db()
 
+
+@app.route('/api/transactions/upload', methods=['POST'])
+@login_required
+def upload_transaction():
+    import anthropic, base64, re
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file'}), 400
+    f = request.files['file']
+    tx_type = request.form.get('type', 'expense')
+    empresa_id = request.form.get('empresa_id') or get_first_empresa(session['user_id'])
+    data = f.read()
+    b64 = base64.standard_b64encode(data).decode()
+    mt = f.mimetype or 'image/jpeg'
+    if mt == 'application/pdf':
+        media_type = 'application/pdf'
+        src = {"type": "base64", "media_type": media_type, "data": b64}
+        content_block = {"type": "document", "source": src}
+    else:
+        media_type = mt if mt in ['image/jpeg','image/png','image/webp','image/gif'] else 'image/jpeg'
+        src = {"type": "base64", "media_type": media_type, "data": b64}
+        content_block = {"type": "image", "source": src}
+    client = anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY'))
+    msg = client.messages.create(
+        model='claude-opus-4-5',
+        max_tokens=512,
+        messages=[{"role":"user","content":[
+            content_block,
+            {"type":"text","text":"Extrae de esta factura/ticket: importe_total (número), iva (número o 0), proveedor (texto), fecha (YYYY-MM-DD), categoria (una de: alimentacion,bebidas,suministros,nominas,alquiler,marketing,otros). Responde SOLO con JSON: {importe, iva, proveedor, fecha, categoria}"}
+        ]}]
+    )
+    raw = msg.content[0].text.strip()
+    raw = re.sub(r'^```json|^```|```$', '', raw, flags=re.MULTILINE).strip()
+    import json as _json
+    parsed = _json.loads(raw)
+    uid = session['user_id']
+    tid = qry(
+        "INSERT INTO transactions (empresa_id,tipo,importe,iva,descripcion,proveedor,fecha,metodo_pago,created_by) VALUES (?,?,?,?,?,?,?,?,?)",
+        [empresa_id, tx_type, parsed.get('importe',0), parsed.get('iva',0),
+         parsed.get('proveedor','Factura'), parsed.get('proveedor',''), parsed.get('fecha',''), 'otro', uid],
+        insert=True
+    )
+    return jsonify({'ok': True, 'id': tid, 'parsed': parsed})
+
 if __name__ == '__main__':
     init_db()
     port = int(os.environ.get('PORT', 5001))
