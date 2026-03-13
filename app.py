@@ -340,7 +340,7 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_f_emp ON facturas(empresa_id);
         CREATE INDEX IF NOT EXISTS idx_f_fecha ON facturas(fecha);
         CREATE INDEX IF NOT EXISTS idx_f_local ON facturas(local_id);
-        CREATE TABLE IF NOT EXISTS transactions(id INTEGER PRIMARY KEY AUTOINCREMENT, empresa_id INTEGER NOT NULL REFERENCES empresas(id), type TEXT NOT NULL DEFAULT 'expense', amount REAL NOT NULL DEFAULT 0, description TEXT, payment_method TEXT DEFAULT 'cash', transaction_date TEXT NOT NULL, category_id INTEGER, vendor_client TEXT, tax_amount REAL DEFAULT 0, notes TEXT, source TEXT DEFAULT 'manual', created_at TEXT DEFAULT(datetime('now')));
+        CREATE TABLE IF NOT EXISTS transactions(id INTEGER PRIMARY KEY AUTOINCREMENT, empresa_id INTEGER NOT NULL REFERENCES empresas(id), type TEXT NOT NULL DEFAULT 'expense', amount REAL NOT NULL DEFAULT 0, description TEXT, payment_method TEXT DEFAULT 'cash', transaction_date TEXT NOT NULL, category_id INTEGER, vendor_client TEXT, tax_amount REAL DEFAULT 0, notes TEXT, source TEXT DEFAULT 'manual', cif_proveedor TEXT, num_factura TEXT, local TEXT, acreedor TEXT, created_at TEXT DEFAULT(datetime('now')));
         CREATE TABLE IF NOT EXISTS reports (id INTEGER PRIMARY KEY AUTOINCREMENT, empresa_id INTEGER, year INTEGER, month INTEGER, content TEXT, income REAL DEFAULT 0, expenses REAL DEFAULT 0, created_at TEXT);
         CREATE TABLE IF NOT EXISTS transaction_categories(id INTEGER PRIMARY KEY AUTOINCREMENT, empresa_id INTEGER NOT NULL REFERENCES empresas(id), name TEXT NOT NULL, type TEXT DEFAULT 'both', activo INTEGER DEFAULT 1);
     ''')
@@ -489,7 +489,7 @@ def upload_transaction():
         max_tokens=512,
         messages=[{"role":"user","content":[
             content_block,
-            {"type":"text","text":"Extrae de esta factura/ticket: importe_total (número), iva (número o 0), proveedor (texto), fecha (YYYY-MM-DD), categoria (una de: alimentacion,bebidas,suministros,nominas,alquiler,marketing,otros). Responde SOLO con JSON: {importe, iva, proveedor, fecha, categoria}"}
+            {"type":"text","text":"Analiza esta factura y extrae información en JSON. CRÍTICO: año 2026 salvo que la factura diga otro. Detecta si es ABONO (palabras: ABONO, CARGO RECTIFICATIVO, NOTA DE CRÉDITO, totales negativos). CIF del PROVEEDOR: busca en cabecera, pie, registro mercantil, limpia ES- y guiones. LOCAL: busca dirección de ENVÍO (ENVIADO A, SHIP TO) solo ciudad. ACREEDOR: nombre fiscal de quien recibe (cliente). Responde SOLO con JSON sin markdown: {importe_total: número positivo, iva: número positivo o 0, irpf: número positivo o 0, proveedor: texto, cif_proveedor: texto limpio sin ES- ni guiones, num_factura: texto, fecha: YYYY-MM-DD, local: solo ciudad, acreedor: nombre fiscal cliente, esAbono: bool, categoria: una de alimentacion/bebidas/suministros/nominas/alquiler/marketing/otros}"}
         ]}]
     )
     raw = msg.content[0].text.strip()
