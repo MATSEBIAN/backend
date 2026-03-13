@@ -4,7 +4,8 @@ Flask + SQLite (puro, sin SQLAlchemy)
 Solo requiere: flask, openpyxl, werkzeug (ya instalados)
 """
 import os, re, json, base64, sqlite3, traceback, urllib.request, urllib.error
-from datetime import datetime, date
+from datetime import datetime
+import jwt as pyjwt, date
 from functools import wraps
 from flask import Flask, request, jsonify, session, send_from_directory, g
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -14,6 +15,7 @@ ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
 app = Flask(__name__, static_folder='frontend', static_url_path='')
 app.config['SESSION_COOKIE_SAMESITE'] = 'None'
 app.config['SESSION_COOKIE_SECURE'] = True
+JWT_SECRET = os.environ.get('JWT_SECRET', 'matsebian-jwt-secret-2026')
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'matsebian-erp-dev-2026')
 app.config['DATABASE'] = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'matsebian_erp.db')
 app.config['UPLOAD_FOLDER'] = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads')
