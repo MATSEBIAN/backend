@@ -359,6 +359,23 @@ def init_db():
             except Exception:
                 pass  # ya existe
         db.commit()
+        # Seed categorías Las Adelitas
+        cats = [
+            ('1.1','SUPERMERCADO','expense'),('1.2','COMIDA','expense'),('1.3','FRUTA Y VERDURA','expense'),
+            ('2.1','CERVEZA','expense'),('2.2','OTROS BEBIDAS','expense'),('2.3','REFRESCOS','expense'),
+            ('3.1','PRODUCTO OTROS','expense'),
+            ('4.1','SALARIO','expense'),('4.2','OTROS SALARIO','expense'),
+            ('5.1','GLOVO','expense'),('5.2','UBER','expense'),
+            ('6.1','LICENCIAS INFORMATICA','expense'),('6.2','MANTENIMIENTOS','expense'),('6.3','REPARACIONES','expense'),
+            ('7.1','LUZ','expense'),('7.2','CARTONAJE Y CONSUMIBLES','expense'),('7.3','AGUA','expense'),
+            ('7.4','GAS','expense'),('7.5','TELEFONO Y ADSL','expense'),('7.6','OTROS SERVICIOS','expense'),
+            ('8.1','ALQUILER','expense'),('8.2','ALQUILER OTROS','expense'),
+            ('9.1','ROYALTY','expense'),('9.2','FONDO MARKETING','expense'),('9.3','LOCAL STORE MARKETING','expense'),
+            ('10.1','PRESTAMOS','expense'),('10.2','GESTORIA LABORAL','expense'),('10.3','ABOGADOS','expense'),
+            ('10.4','GESTORIA FISCAL','expense'),('10.5','EMPRESA OTROS','expense'),
+        ]
+        for codigo, nombre, tipo in cats:
+            db.execute('INSERT INTO transaction_categories(empresa_id,name,type) VALUES(?,?,?)', (1, f'{codigo} {nombre}', tipo))
         db.execute("INSERT INTO empresas(nombre,nombre_corto,cif,tipo,color) VALUES(?,?,?,?,?)", ('Las Adelitas - Sabores Adelita S.L.','adelitas','B12345678','restaurante','#00ff88'))
         db.execute("INSERT INTO empresas(nombre,nombre_corto,tipo,color) VALUES(?,?,?,?)", ("Carl's Jr - Morenlonia S.L.",'carlsjr','franquicia','#ff6600'))
         db.execute("INSERT INTO locales(empresa_id,nombre,nombre_corto,ciudad) VALUES(1,'Las Adelitas Madrid','LAD','Madrid')")
@@ -416,6 +433,14 @@ def delete_transaction(tid):
 def list_tx_categories():
     eid = get_first_empresa(session['user_id'])
     return jsonify(qry('SELECT * FROM transaction_categories WHERE empresa_id=? AND activo=1', [eid]))
+
+@app.route('/api/transactions/<int:tid>/category', methods=['PATCH'])
+@login_required
+def update_tx_category(tid):
+    d = request.json
+    exe('UPDATE transactions SET category_id=? WHERE id=? AND empresa_id=?',
+        [d.get('category_id'), tid, session['empresa_id']])
+    return jsonify({'ok': True})
 
 @app.route('/api/transactions/categories', methods=['POST'])
 @login_required
