@@ -353,6 +353,12 @@ def init_db():
             ('num_factura',   'TEXT'),
             ('local',         'TEXT'),
             ('acreedor',      'TEXT'),
+            ('concepto',      'TEXT'),
+            ('albaran_irpf',  'TEXT'),
+            ('revisado',      'TEXT'),
+            ('pagado',        'TEXT'),
+            ('nota2',         'TEXT'),
+            ('nota3',         'TEXT'),
         ]:
             try:
                 db.execute(f'ALTER TABLE transactions ADD COLUMN {col} {typedef}')
@@ -433,6 +439,20 @@ def delete_transaction(tid):
 def list_tx_categories():
     eid = get_first_empresa(session['user_id'])
     return jsonify(qry('SELECT * FROM transaction_categories WHERE empresa_id=? AND activo=1', [eid]))
+
+@app.route('/api/transactions/<int:tid>', methods=['PATCH'])
+@login_required
+def update_transaction(tid):
+    d = request.json
+    allowed = ['vendor_client','local','transaction_date','description','concepto',
+               'amount','tax_amount','albaran_irpf','revisado','pagado','notes',
+               'nota2','nota3','cif_proveedor','num_factura','acreedor','category_id']
+    sets = [f'{k}=?' for k in d if k in allowed]
+    vals = [d[k] for k in d if k in allowed]
+    if not sets: return jsonify({'ok':False}), 400
+    exe(f'UPDATE transactions SET {",".join(sets)} WHERE id=? AND empresa_id=?',
+        vals + [tid, session['empresa_id']])
+    return jsonify({'ok': True})
 
 @app.route('/api/transactions/<int:tid>/category', methods=['PATCH'])
 @login_required
