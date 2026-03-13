@@ -450,16 +450,18 @@ def update_transaction(tid):
     sets = [f'{k}=?' for k in d if k in allowed]
     vals = [d[k] for k in d if k in allowed]
     if not sets: return jsonify({'ok':False}), 400
+    eid = session.get('empresa_id') or (qry('SELECT id FROM empresas WHERE activo=1 LIMIT 1',[]) or [{}])[0].get('id',1)
     exe(f'UPDATE transactions SET {",".join(sets)} WHERE id=? AND empresa_id=?',
-        vals + [tid, session['empresa_id']])
+        vals + [tid, eid])
     return jsonify({'ok': True})
 
 @app.route('/api/transactions/<int:tid>/category', methods=['PATCH'])
 @login_required
 def update_tx_category(tid):
     d = request.json
+    eid = session.get('empresa_id') or (qry('SELECT id FROM empresas WHERE activo=1 LIMIT 1',[]) or [{}])[0].get('id',1)
     exe('UPDATE transactions SET category_id=? WHERE id=? AND empresa_id=?',
-        [d.get('category_id'), tid, session['empresa_id']])
+        [d.get('category_id'), tid, eid])
     return jsonify({'ok': True})
 
 @app.route('/api/transactions/categories', methods=['POST'])
