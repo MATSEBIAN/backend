@@ -417,8 +417,27 @@ def create_tx_category():
 @login_required
 def dashboard_frontend():
     eid = get_first_empresa(session['user_id'])
-    if not eid: return jsonify({})
-    return dashboard(eid)
+    if not eid: return jsonify({'ingresos':0,'gastos':0,'neto':0,'margen':0,'por_categoria':[],'ultimos':[]})
+    month = request.args.get('month')
+    year  = request.args.get('year')
+    w = ['empresa_id=?']; p = [eid]
+    if year:  w.append('strftime("%Y",transaction_date)=?');   p.append(year)
+    if month: w.append('strftime("%m",transaction_date)=?');   p.append(str(month).zfill(2))
+    ws = ' AND '.join(w)
+    rows = qry(f'SELECT * FROM transactions WHERE {ws} ORDER BY transaction_date DESC', p)
+    ingresos = sum(r['amount'] for r in rows if r['type']=='income')
+    gastos   = sum(r['amount'] for r in rows if r['type']=='expense')
+    neto = ingresos - gastos
+    margen = round((neto/ingresos*100),1) if ingresos>0 else 0
+    # por categoria
+    cats = {}
+    for r in rows:
+        c = r.get('category_id') or 'Sin categoría'
+        cats.setdefault(c, {'income':0,'expense':0})
+        cats[c][r['type'] if r['type'] in ('income','expense') else 'expense'] += r['amount']
+    por_categoria = [{'categoria':k,'income':v['income'],'expense':v['expense']} for k,v in cats.items()]
+    ultimos = rows[:10]
+    return jsonify({'ingresos':ingresos,'gastos':gastos,'neto':neto,'margen':margen,'por_categoria':por_categoria,'ultimos':ultimos})
 
 
 init_db()
