@@ -437,7 +437,26 @@ def dashboard_frontend():
         cats[c][r['type'] if r['type'] in ('income','expense') else 'expense'] += r['amount']
     por_categoria = [{'categoria':k,'income':v['income'],'expense':v['expense']} for k,v in cats.items()]
     ultimos = rows[:10]
-    return jsonify({'ingresos':ingresos,'gastos':gastos,'neto':neto,'margen':margen,'por_categoria':por_categoria,'ultimos':ultimos})
+    expense_bd = {}
+    income_bd = {}
+    for r in rows:
+        vc = r.get('vendor_client') or 'Otros'
+        if r['type'] == 'expense':
+            expense_bd[vc] = expense_bd.get(vc, 0) + r['amount']
+        else:
+            income_bd[vc] = income_bd.get(vc, 0) + r['amount']
+    withdrawable = round(neto * 0.4, 2) if neto > 0 else 0
+    return jsonify({
+        'summary': {
+            'income': ingresos, 'expenses': gastos, 'net': neto,
+            'margin_pct': margen, 'withdrawable': withdrawable,
+            'tx_count': len(rows)
+        },
+        'expense_breakdown': expense_bd,
+        'income_breakdown': income_bd,
+        'recent_transactions': ultimos,
+        'ingresos': ingresos, 'gastos': gastos, 'neto': neto, 'margen': margen
+    })
 
 
 init_db()
