@@ -79,7 +79,7 @@ def login():
         return jsonify({'error': 'Credenciales incorrectas'}), 401
     session['user_id'] = u['id']
     token = pyjwt.encode({'user_id': u['id'], 'exp': datetime.datetime.utcnow() + datetime.timedelta(days=30)}, JWT_SECRET, algorithm='HS256')
-    return jsonify({'user': {k:u[k] for k in ['id','email','nombre','rol']}, 'empresas': get_user_empresas(u['id']), 'token': token})
+    return jsonify({'user': {k:u[k] for k in ['id','email','nombre','rol']}, 'empresas': get_user_empresas(u['id']), 'token': token, 'access_token': token})
 
 @app.route('/api/auth/logout', methods=['POST'])
 def logout(): session.clear(); return jsonify({'ok': True})
