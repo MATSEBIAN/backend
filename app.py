@@ -341,6 +341,7 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_f_fecha ON facturas(fecha);
         CREATE INDEX IF NOT EXISTS idx_f_local ON facturas(local_id);
         CREATE TABLE IF NOT EXISTS transactions(id INTEGER PRIMARY KEY AUTOINCREMENT, empresa_id INTEGER NOT NULL REFERENCES empresas(id), type TEXT NOT NULL DEFAULT 'expense', amount REAL NOT NULL DEFAULT 0, description TEXT, payment_method TEXT DEFAULT 'cash', transaction_date TEXT NOT NULL, category_id INTEGER, vendor_client TEXT, tax_amount REAL DEFAULT 0, notes TEXT, source TEXT DEFAULT 'manual', created_at TEXT DEFAULT(datetime('now')));
+        CREATE TABLE IF NOT EXISTS reports (id INTEGER PRIMARY KEY AUTOINCREMENT, empresa_id INTEGER, year INTEGER, month INTEGER, content TEXT, created_at TEXT);
         CREATE TABLE IF NOT EXISTS transaction_categories(id INTEGER PRIMARY KEY AUTOINCREMENT, empresa_id INTEGER NOT NULL REFERENCES empresas(id), name TEXT NOT NULL, type TEXT DEFAULT 'both', activo INTEGER DEFAULT 1);
     ''')
     if db.execute('SELECT COUNT(*) FROM usuarios').fetchone()[0] == 0:
