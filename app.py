@@ -508,3 +508,33 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5001))
     print(f'\n  MATSEBIAN ERP v2.0\n  http://localhost:{port}\n  Login: daniel@matsebian.com / admin123\n')
     app.run(host='0.0.0.0', port=port, debug=True)
+
+@app.route('/api/reports/', methods=['GET'])
+@login_required
+def get_reports():
+    eid = get_first_empresa(session['user_id'])
+    if not eid: return jsonify([])
+    reports = qry('SELECT * FROM reports WHERE empresa_id=? ORDER BY created_at DESC', [eid])
+    return jsonify(reports)
+
+@app.route('/api/reports/generate/<int:year>/<int:month>', methods=['POST'])
+@login_required
+def generate_report(year, month):
+    import anthropic
+    eid = get_first_empresa(session['user_id'])
+    if not eid: return jsonify({'error': 'No empresa'}), 400
+    rows = qry('SELECT * FROM transactions WHERE empresa_id=? AND strftime("%Y",transaction_date)=? AND strftime("%m",transaction_date)=?',
+               [eid, str(year), str(month).zfill(2)])
+    ingresos = sum(r['amount'] for r in rows if r['type']=='income')
+    gastos   = sum(r['amount'] for r in rows if r['type']=='expense')
+    neto = ingresos - gastos
+    resumen_tx = '\n'.join([f"- {r['transaction_date']} {r['type']} €{r['amount']} {r['description']}" for r in rows[:30]])
+    client = anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY'))
+    msg = client.messages.create(
+        model='claude-opus-4-5', max_tokens=600,
+        messages=[{"role":"user","content":f"Eres asesor financiero de un restaurante/franquicia español. Datos del mes {month}/{year}:\nIngresos: €{ingresos}\nGastos: €{gastos}\nNeto: €{neto}\nMovimientos:\n{resumen_tx}\n\nEscribe un reporte mensual breve (3-4 párrafos) con: resumen de resultados, análisis, y recomendación de acción concreta. En español, directo y profesional."}]
+    )
+    texto = msg.content[0].text
+    exe('INSERT INTO reports (empresa_id, year, month, content, created_at) VALUES (?,?,?,?,datetime("now"))',
+        [eid, year, month, texto])
+    return jsonify({'ok': True, 'content': texto})
