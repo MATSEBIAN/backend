@@ -458,13 +458,12 @@ def upload_transaction():
     import json as _json
     parsed = _json.loads(raw)
     uid = session['user_id']
-    tid = qry(
-        "INSERT INTO transactions (empresa_id,tipo,importe,iva,descripcion,proveedor,fecha,metodo_pago,created_by) VALUES (?,?,?,?,?,?,?,?,?)",
+    exe(
+        "INSERT INTO transactions (empresa_id,type,amount,tax_amount,description,vendor_client,transaction_date,payment_method,source) VALUES (?,?,?,?,?,?,?,?,?)",
         [empresa_id, tx_type, parsed.get('importe',0), parsed.get('iva',0),
-         parsed.get('proveedor','Factura'), parsed.get('proveedor',''), parsed.get('fecha',''), 'otro', uid],
-        insert=True
+         parsed.get('proveedor','Factura'), parsed.get('proveedor',''), parsed.get('fecha', str(datetime.date.today())), 'cash', 'ocr']
     )
-    return jsonify({'ok': True, 'id': tid, 'parsed': parsed})
+    return jsonify({'ok': True, 'parsed': parsed})
 
 if __name__ == '__main__':
     init_db()
