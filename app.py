@@ -5,7 +5,8 @@ Solo requiere: flask, openpyxl, werkzeug (ya instalados)
 """
 import os, re, json, base64, sqlite3, traceback, urllib.request, urllib.error
 from datetime import datetime
-import jwt as pyjwt, date
+import jwt as pyjwt
+import datetime
 from functools import wraps
 from flask import Flask, request, jsonify, session, send_from_directory, g
 from werkzeug.security import generate_password_hash, check_password_hash
