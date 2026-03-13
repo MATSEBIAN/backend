@@ -1,0 +1,347 @@
+"""
+Matsebian ERP v2.0 - Backend API
+Flask + SQLite (puro, sin SQLAlchemy)
+Solo requiere: flask, openpyxl, werkzeug (ya instalados)
+"""
+import os, re, json, base64, sqlite3, traceback, urllib.request, urllib.error
+from datetime import datetime, date
+from functools import wraps
+from flask import Flask, request, jsonify, session, send_from_directory, g
+from werkzeug.security import generate_password_hash, check_password_hash
+
+ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
+
+app = Flask(__name__, static_folder='frontend', static_url_path='')
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'matsebian-erp-dev-2026')
+app.config['DATABASE'] = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'matsebian_erp.db')
+app.config['UPLOAD_FOLDER'] = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads')
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+
+# === DB Helpers ===
+def get_db():
+    if 'db' not in g:
+        g.db = sqlite3.connect(app.config['DATABASE'])
+        g.db.row_factory = sqlite3.Row
+        g.db.execute("PRAGMA journal_mode=WAL")
+        g.db.execute("PRAGMA foreign_keys=ON")
+    return g.db
+
+@app.teardown_appcontext
+def close_db(exc):
+    db = g.pop('db', None)
+    if db: db.close()
+
+def qry(sql, args=(), one=False):
+    cur = get_db().execute(sql, args)
+    rv = [dict(row) for row in cur.fetchall()]
+    return rv[0] if one and rv else (None if one else rv)
+
+def exe(sql, args=()):
+    db = get_db(); cur = db.execute(sql, args); db.commit(); return cur.lastrowid
+
+# === CORS manual ===
+@app.after_request
+def cors(r):
+    r.headers['Access-Control-Allow-Origin'] = request.headers.get('Origin', '*')
+    r.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+    r.headers['Access-Control-Allow-Methods'] = 'GET,POST,PUT,DELETE,OPTIONS'
+    r.headers['Access-Control-Allow-Credentials'] = 'true'
+    return r
+
+@app.route('/api/<path:p>', methods=['OPTIONS'])
+def opts(p): return '', 204
+
+# === Auth ===
+def login_required(f):
+    @wraps(f)
+    def d(*a, **k):
+        if 'user_id' not in session: return jsonify({'error': 'No autorizado'}), 401
+        return f(*a, **k)
+    return d
+
+def get_user_empresas(uid):
+    empresas = qry('SELECT e.*, ue.permisos FROM empresas e JOIN usuarios_empresas ue ON e.id=ue.empresa_id WHERE ue.usuario_id=? AND e.activo=1', [uid])
+    for e in empresas:
+        e['locales'] = qry('SELECT * FROM locales WHERE empresa_id=? AND activo=1', [e['id']])
+    return empresas
+
+@app.route('/api/auth/login', methods=['POST'])
+def login():
+    d = request.get_json()
+    u = qry('SELECT * FROM usuarios WHERE email=? AND activo=1', [d.get('email','').strip().lower()], one=True)
+    if not u or not check_password_hash(u['password_hash'], d.get('password','')):
+        return jsonify({'error': 'Credenciales incorrectas'}), 401
+    session['user_id'] = u['id']
+    return jsonify({'user': {k:u[k] for k in ['id','email','nombre','rol']}, 'empresas': get_user_empresas(u['id'])})
+
+@app.route('/api/auth/logout', methods=['POST'])
+def logout(): session.clear(); return jsonify({'ok': True})
+
+@app.route('/api/auth/me')
+@login_required
+def me():
+    u = qry('SELECT * FROM usuarios WHERE id=?', [session['user_id']], one=True)
+    if not u: return jsonify({'error': 'No encontrado'}), 401
+    return jsonify({'user': {k:u[k] for k in ['id','email','nombre','rol']}, 'empresas': get_user_empresas(u['id'])})
+
+# === Empresas ===
+@app.route('/api/empresas')
+@login_required
+def list_empresas(): return jsonify(get_user_empresas(session['user_id']))
+
+@app.route('/api/empresas', methods=['POST'])
+@login_required
+def create_empresa():
+    d = request.get_json()
+    eid = exe('INSERT INTO empresas(nombre,nombre_corto,cif,tipo,color) VALUES(?,?,?,?,?)',
+              [d['nombre'], d.get('nombre_corto',''), d.get('cif'), d.get('tipo','restaurante'), d.get('color','#00ff88')])
+    exe('INSERT INTO usuarios_empresas(usuario_id,empresa_id,permisos) VALUES(?,?,?)', [session['user_id'], eid, 'admin'])
+    for loc in d.get('locales', []):
+        exe('INSERT INTO locales(empresa_id,nombre,nombre_corto,ciudad) VALUES(?,?,?,?)',
+            [eid, loc['nombre'], loc.get('nombre_corto'), loc.get('ciudad')])
+    return jsonify(qry('SELECT * FROM empresas WHERE id=?', [eid], one=True)), 201
+
+# === Locales ===
+@app.route('/api/empresas/<int:eid>/locales')
+@login_required
+def list_locales(eid): return jsonify(qry('SELECT * FROM locales WHERE empresa_id=? AND activo=1', [eid]))
+
+@app.route('/api/empresas/<int:eid>/locales', methods=['POST'])
+@login_required
+def create_local(eid):
+    d = request.get_json()
+    lid = exe('INSERT INTO locales(empresa_id,nombre,nombre_corto,ciudad) VALUES(?,?,?,?)',
+              [eid, d['nombre'], d.get('nombre_corto'), d.get('ciudad')])
+    return jsonify(qry('SELECT * FROM locales WHERE id=?', [lid], one=True)), 201
+
+# === Facturas ===
+@app.route('/api/empresas/<int:eid>/facturas')
+@login_required
+def list_facturas(eid):
+    sql = 'SELECT f.*, l.nombre as local_nombre FROM facturas f LEFT JOIN locales l ON f.local_id=l.id WHERE f.empresa_id=?'
+    p = [eid]
+    if request.args.get('year'): sql += ' AND strftime("%%Y",f.fecha)=?'; p.append(request.args['year'])
+    if request.args.get('month'): sql += ' AND strftime("%%Y-%%m",f.fecha)=?'; p.append(request.args['month'])
+    if request.args.get('local_id'): sql += ' AND f.local_id=?'; p.append(int(request.args['local_id']))
+    return jsonify(qry(sql + ' ORDER BY f.fecha DESC', p))
+
+@app.route('/api/empresas/<int:eid>/facturas', methods=['POST'])
+@login_required
+def create_factura(eid):
+    d = request.get_json()
+    local_id = d.get('local_id')
+    if not local_id and d.get('local_nombre'):
+        n = d['local_nombre'].upper()
+        for l in qry('SELECT * FROM locales WHERE empresa_id=? AND activo=1', [eid]):
+            if l['nombre'].upper() in n or n in l['nombre'].upper() or (l['nombre_corto'] and l['nombre_corto'].upper() in n):
+                local_id = l['id']; break
+    fid = exe('INSERT INTO facturas(empresa_id,local_id,fecha,num_factura,proveedor,cif_proveedor,concepto,base,iva,irpf,total,origen) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+              [eid, local_id, d.get('fecha',datetime.now().strftime('%Y-%m-%d')), d.get('num_factura'), d.get('proveedor','?'),
+               d.get('cif_proveedor'), d.get('concepto'), float(d.get('base',0)), float(d.get('iva',0)),
+               float(d.get('irpf',0)), float(d.get('total',0)), d.get('origen','manual')])
+    return jsonify(qry('SELECT * FROM facturas WHERE id=?', [fid], one=True)), 201
+
+@app.route('/api/empresas/<int:eid>/facturas/<int:fid>', methods=['DELETE'])
+@login_required
+def delete_factura(eid, fid):
+    exe('DELETE FROM facturas WHERE id=? AND empresa_id=?', [fid, eid]); return jsonify({'ok': True})
+
+# === Import Excel ===
+@app.route('/api/empresas/<int:eid>/importar-excel', methods=['POST'])
+@login_required
+def importar_excel(eid):
+    if 'file' not in request.files: return jsonify({'error': 'No file'}), 400
+    f = request.files['file']
+    try:
+        import openpyxl; from io import BytesIO
+        wb = openpyxl.load_workbook(BytesIO(f.read()), data_only=True); ws = wb.active
+        hdrs = [str(c.value or '').strip() for c in ws[1]]
+        aliases = {'FECHA':['FECHA','Fecha'],'ACREEDOR':['ACREEDOR','Acreedor','PROVEEDOR'],'P&L':['P&L','P and L','CONCEPTO'],
+                   'BASE':['BASE','Base'],'IVA':['IVA'],'TOTAL':['TOTAL FACT','TOTAL'],'IRPF':['ALBARAN/IRPF','IRPF','ALBARAN'],
+                   'CIF':['CIF','NIF'],'NFACT':['Nº FACTURA','NUM FACTURA'],'LOCAL':['LOCAL','Local']}
+        ci = {}
+        for k, ns in aliases.items():
+            for i, h in enumerate(hdrs):
+                if h in ns: ci[k]=i; break
+        locales = qry('SELECT * FROM locales WHERE empresa_id=? AND activo=1', [eid])
+        db = get_db(); imp = 0; errs = []
+        for ri, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
+            try:
+                if not row or all(v is None for v in row): continue
+                def v(k, d=None):
+                    i=ci.get(k); return row[i] if i is not None and i<len(row) and row[i] is not None else d
+                prov = str(v('ACREEDOR') or '').strip()
+                if not prov: continue
+                fr = v('FECHA')
+                if isinstance(fr,(datetime,date)): fecha=fr.strftime('%Y-%m-%d') if isinstance(fr,datetime) else fr.isoformat()
+                elif isinstance(fr,str):
+                    fecha=None
+                    for fmt in ['%Y-%m-%d','%d/%m/%Y','%d-%m-%Y']:
+                        try: fecha=datetime.strptime(fr.strip(),fmt).strftime('%Y-%m-%d'); break
+                        except: pass
+                    if not fecha: fecha=datetime.now().strftime('%Y-%m-%d')
+                else: fecha=datetime.now().strftime('%Y-%m-%d')
+                loc_raw = str(v('LOCAL') or '').strip().upper(); lid=None
+                for l in locales:
+                    if l['nombre'].upper() in loc_raw or loc_raw in l['nombre'].upper() or (l['nombre_corto'] and l['nombre_corto'].upper() in loc_raw):
+                        lid=l['id']; break
+                db.execute('INSERT INTO facturas(empresa_id,local_id,fecha,num_factura,proveedor,cif_proveedor,concepto,base,iva,irpf,total,origen) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+                    [eid, lid, fecha, str(v('NFACT') or '') or None, prov, str(v('CIF') or '') or None,
+                     str(v('P&L') or ''), float(v('BASE') or 0), float(v('IVA') or 0), float(v('IRPF') or 0), float(v('TOTAL') or 0), 'excel'])
+                imp += 1
+            except Exception as e: errs.append(f'Fila {ri}: {e}')
+        db.commit()
+        return jsonify({'ok':True, 'imported':imp, 'errors':errs[:10]})
+    except Exception as e: traceback.print_exc(); return jsonify({'error':str(e)}), 500
+
+# === Ventas ===
+@app.route('/api/empresas/<int:eid>/ventas')
+@login_required
+def list_ventas(eid):
+    sql = 'SELECT v.*, l.nombre as local_nombre FROM ventas_periodo v LEFT JOIN locales l ON v.local_id=l.id WHERE v.empresa_id=?'
+    p = [eid]
+    if request.args.get('periodo'): sql += ' AND v.periodo=?'; p.append(request.args['periodo'])
+    return jsonify(qry(sql + ' ORDER BY v.periodo DESC', p))
+
+@app.route('/api/empresas/<int:eid>/ventas', methods=['POST'])
+@login_required
+def upsert_ventas(eid):
+    d = request.get_json(); per=d['periodo']; lid=d.get('local_id')
+    ex = qry('SELECT id FROM ventas_periodo WHERE empresa_id=? AND periodo=? AND (local_id=? OR (local_id IS NULL AND ? IS NULL))', [eid,per,lid,lid], one=True)
+    if ex: exe('UPDATE ventas_periodo SET ventas_total=?, coste_laboral=? WHERE id=?', [float(d.get('ventas_total',0)), float(d.get('coste_laboral',0)), ex['id']]); vid=ex['id']
+    else: vid = exe('INSERT INTO ventas_periodo(empresa_id,local_id,periodo,ventas_total,coste_laboral) VALUES(?,?,?,?,?)', [eid,lid,per,float(d.get('ventas_total',0)),float(d.get('coste_laboral',0))])
+    return jsonify(qry('SELECT * FROM ventas_periodo WHERE id=?', [vid], one=True))
+
+# === OCR ===
+@app.route('/api/empresas/<int:eid>/ocr', methods=['POST'])
+@login_required
+def ocr_factura(eid):
+    if not ANTHROPIC_API_KEY:
+        return jsonify({'error': 'Configura ANTHROPIC_API_KEY. Ejecuta: export ANTHROPIC_API_KEY=tu-clave-aqui'}), 400
+    d = request.get_json()
+    img = d.get('image','')
+    if not img: return jsonify({'error': 'No image'}), 400
+    if ',' in img: img = img.split(',')[1]
+    locales = qry('SELECT * FROM locales WHERE empresa_id=? AND activo=1', [eid])
+    loc_text = ', '.join([f"{l['nombre']} ({l['nombre_corto']})" if l['nombre_corto'] else l['nombre'] for l in locales])
+    body = json.dumps({
+        "model": "claude-sonnet-4-20250514", "max_tokens": 2000,
+        "messages": [{"role":"user","content":[
+            {"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":img}},
+            {"type":"text","text":f"""Analiza esta factura y extrae los datos en JSON.
+Locales disponibles: {loc_text}
+IMPORTANTE: Prioriza "ENVIADO A"/"SHIP TO" sobre "FACTURADO A" para el local.
+Responde SOLO JSON valido:
+{{"fecha":"YYYY-MM-DD","proveedor":"nombre","cif_proveedor":"CIF","num_factura":"numero",
+"concepto":"categoria P&L","base":0.00,"iva":0.00,"irpf":0.00,"total":0.00,
+"local_nombre":"local detectado o null","notas":"observaciones"}}"""}
+        ]}]
+    }).encode('utf-8')
+    try:
+        req = urllib.request.Request('https://api.anthropic.com/v1/messages', data=body,
+            headers={'Content-Type':'application/json','x-api-key':ANTHROPIC_API_KEY,'anthropic-version':'2023-06-01'})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read().decode('utf-8'))
+        txt = result['content'][0]['text']
+        if '```json' in txt: txt = txt.split('```json')[1].split('```')[0]
+        elif '```' in txt: txt = txt.split('```')[1].split('```')[0]
+        ocr = json.loads(txt.strip())
+        # Save image
+        fn = f"ocr_{eid}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+        with open(os.path.join(app.config['UPLOAD_FOLDER'], fn), 'wb') as f:
+            f.write(base64.b64decode(img))
+        ocr['documento_path'] = fn; ocr['origen'] = 'ocr'
+        return jsonify(ocr)
+    except urllib.error.HTTPError as e:
+        err = e.read().decode('utf-8') if e.readable() else str(e)
+        return jsonify({'error': f'API Anthropic: {err}'}), 500
+    except Exception as e:
+        traceback.print_exc(); return jsonify({'error': str(e)}), 500
+
+# === API Key config ===
+@app.route('/api/config/apikey', methods=['POST'])
+@login_required
+def set_apikey():
+    global ANTHROPIC_API_KEY
+    d = request.get_json()
+    key = d.get('key','').strip()
+    if not key.startswith('sk-'): return jsonify({'error': 'La clave debe empezar con sk-'}), 400
+    ANTHROPIC_API_KEY = key
+    return jsonify({'ok': True})
+
+# === Dashboard ===
+@app.route('/api/empresas/<int:eid>/dashboard')
+@login_required
+def dashboard(eid):
+    w=['f.empresa_id=?']; p=[eid]
+    if request.args.get('year'): w.append('strftime("%%Y",f.fecha)=?'); p.append(request.args['year'])
+    if request.args.get('month'): w.append('strftime("%%Y-%%m",f.fecha)=?'); p.append(request.args['month'])
+    if request.args.get('local_id'): w.append('f.local_id=?'); p.append(int(request.args['local_id']))
+    ws = ' AND '.join(w)
+    s = qry(f'SELECT COUNT(*) as tf, COALESCE(SUM(base),0) as tb, COALESCE(SUM(iva),0) as ti, COALESCE(SUM(total),0) as tg, COALESCE(SUM(irpf),0) as tr FROM facturas f WHERE {ws}', p, one=True)
+    # Ventas
+    vw=['v.empresa_id=?']; vp=[eid]
+    if request.args.get('month'): vw.append('v.periodo=?'); vp.append(request.args['month'])
+    elif request.args.get('year'): vw.append('v.periodo LIKE ?'); vp.append(f"{request.args['year']}-%")
+    if request.args.get('local_id'): vw.append('v.local_id=?'); vp.append(int(request.args['local_id']))
+    vd = qry(f"SELECT v.*, l.nombre as ln FROM ventas_periodo v LEFT JOIN locales l ON v.local_id=l.id WHERE {' AND '.join(vw)}", vp)
+    tv=sum(v['ventas_total'] for v in vd); tc=sum(v['coste_laboral'] for v in vd)
+    ga=abs(s['tg']); rc=tv-tc-ga
+    iv=tv-(tv/1.1) if tv>0 else 0; ig=abs(s['ti']); ip=iv-ig; cf=rc-s['tr']-(ip if ip>0 else 0)
+    vs=tv/1.1 if tv>0 else 0; ba=abs(s['tb']); rf=vs-tc-ba
+    return jsonify({
+        'resumen': {'total_facturas':s['tf'],'total_base':s['tb'],'total_iva':s['ti'],'total_gastado':s['tg'],'total_irpf':s['tr'],'promedio_factura':s['tg']/s['tf'] if s['tf']>0 else 0},
+        'ventas': {'total_ventas':tv,'total_coste_laboral':tc,'por_local':{v['ln'] or 'General':v['ventas_total'] for v in vd},'coste_por_local':{v['ln'] or 'General':v['coste_laboral'] for v in vd}},
+        'cashflow': {'ventas':tv,'coste_laboral':tc,'total_gastado':ga,'resultado':rc,'irpf':s['tr'],'iva_pagar':ip,'cash_flow':cf},
+        'fiscal': {'ventas_sin_iva':vs,'coste_laboral':tc,'total_gastado_base':ba,'resultado':rf},
+        'graficos': {
+            'por_proveedor': qry(f'SELECT proveedor as nombre, SUM(ABS(total)) as total FROM facturas f WHERE {ws} GROUP BY proveedor ORDER BY total DESC LIMIT 10', p),
+            'por_categoria': qry(f'SELECT COALESCE(concepto,"Sin cat") as nombre, SUM(ABS(total)) as total FROM facturas f WHERE {ws} GROUP BY concepto ORDER BY total DESC LIMIT 10', p),
+            'por_mes': qry(f'SELECT strftime("%%Y-%%m",fecha) as mes, SUM(ABS(total)) as total FROM facturas f WHERE {ws} GROUP BY mes ORDER BY mes', p),
+            'por_local': qry(f'SELECT COALESCE(l.nombre,"Sin local") as nombre, SUM(ABS(f.total)) as total FROM facturas f LEFT JOIN locales l ON f.local_id=l.id WHERE {ws} GROUP BY l.nombre ORDER BY total DESC', p),
+        },
+        'filtros_disponibles': {
+            'years': [r['y'] for r in qry('SELECT DISTINCT strftime("%%Y",fecha) as y FROM facturas WHERE empresa_id=? ORDER BY y', [eid])],
+            'months': [r['m'] for r in qry('SELECT DISTINCT strftime("%%Y-%%m",fecha) as m FROM facturas WHERE empresa_id=? ORDER BY m', [eid])],
+            'locales': qry('SELECT id, nombre FROM locales WHERE empresa_id=? AND activo=1', [eid])
+        }
+    })
+
+# === Frontend ===
+@app.route('/')
+def index(): return send_from_directory(app.static_folder, 'index.html')
+
+# === Init DB ===
+def init_db():
+    db = sqlite3.connect(app.config['DATABASE'])
+    db.executescript('''
+        CREATE TABLE IF NOT EXISTS usuarios(id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, nombre TEXT NOT NULL, rol TEXT DEFAULT 'admin', activo INTEGER DEFAULT 1, created_at TEXT DEFAULT(datetime('now')));
+        CREATE TABLE IF NOT EXISTS empresas(id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL, nombre_corto TEXT NOT NULL, cif TEXT, tipo TEXT DEFAULT 'restaurante', moneda TEXT DEFAULT 'EUR', iva_por_defecto REAL DEFAULT 10.0, color TEXT DEFAULT '#00ff88', activo INTEGER DEFAULT 1, created_at TEXT DEFAULT(datetime('now')));
+        CREATE TABLE IF NOT EXISTS locales(id INTEGER PRIMARY KEY AUTOINCREMENT, empresa_id INTEGER NOT NULL REFERENCES empresas(id), nombre TEXT NOT NULL, nombre_corto TEXT, direccion TEXT, ciudad TEXT, activo INTEGER DEFAULT 1, created_at TEXT DEFAULT(datetime('now')));
+        CREATE TABLE IF NOT EXISTS categorias_gasto(id INTEGER PRIMARY KEY AUTOINCREMENT, empresa_id INTEGER NOT NULL REFERENCES empresas(id), codigo TEXT NOT NULL, nombre TEXT NOT NULL, grupo TEXT, activo INTEGER DEFAULT 1);
+        CREATE TABLE IF NOT EXISTS facturas(id INTEGER PRIMARY KEY AUTOINCREMENT, empresa_id INTEGER NOT NULL REFERENCES empresas(id), local_id INTEGER REFERENCES locales(id), categoria_id INTEGER REFERENCES categorias_gasto(id), fecha TEXT NOT NULL, num_factura TEXT, proveedor TEXT NOT NULL, cif_proveedor TEXT, concepto TEXT, base REAL DEFAULT 0, iva REAL DEFAULT 0, irpf REAL DEFAULT 0, total REAL DEFAULT 0, notas TEXT, documento_path TEXT, origen TEXT DEFAULT 'manual', created_at TEXT DEFAULT(datetime('now')), updated_at TEXT DEFAULT(datetime('now')));
+        CREATE TABLE IF NOT EXISTS ventas_periodo(id INTEGER PRIMARY KEY AUTOINCREMENT, empresa_id INTEGER NOT NULL REFERENCES empresas(id), local_id INTEGER REFERENCES locales(id), periodo TEXT NOT NULL, ventas_total REAL DEFAULT 0, coste_laboral REAL DEFAULT 0, notas TEXT, created_at TEXT DEFAULT(datetime('now')), UNIQUE(empresa_id,local_id,periodo));
+        CREATE TABLE IF NOT EXISTS usuarios_empresas(id INTEGER PRIMARY KEY AUTOINCREMENT, usuario_id INTEGER NOT NULL REFERENCES usuarios(id), empresa_id INTEGER NOT NULL REFERENCES empresas(id), permisos TEXT DEFAULT 'admin', UNIQUE(usuario_id,empresa_id));
+        CREATE INDEX IF NOT EXISTS idx_f_emp ON facturas(empresa_id);
+        CREATE INDEX IF NOT EXISTS idx_f_fecha ON facturas(fecha);
+        CREATE INDEX IF NOT EXISTS idx_f_local ON facturas(local_id);
+    ''')
+    if db.execute('SELECT COUNT(*) FROM usuarios').fetchone()[0] == 0:
+        pw = generate_password_hash('admin123')
+        db.execute('INSERT INTO usuarios(email,password_hash,nombre,rol) VALUES(?,?,?,?)', ('daniel@matsebian.com',pw,'Daniel','admin'))
+        db.execute("INSERT INTO empresas(nombre,nombre_corto,cif,tipo,color) VALUES(?,?,?,?,?)", ('Las Adelitas - Sabores Adelita S.L.','adelitas','B12345678','restaurante','#00ff88'))
+        db.execute("INSERT INTO empresas(nombre,nombre_corto,tipo,color) VALUES(?,?,?,?)", ("Carl's Jr - Morenlonia S.L.",'carlsjr','franquicia','#ff6600'))
+        db.execute("INSERT INTO locales(empresa_id,nombre,nombre_corto,ciudad) VALUES(1,'Las Adelitas Madrid','LAD','Madrid')")
+        db.execute("INSERT INTO locales(empresa_id,nombre,nombre_corto,ciudad) VALUES(2,'Dos Hermanas','WAY','Dos Hermanas')")
+        db.execute("INSERT INTO locales(empresa_id,nombre,nombre_corto,ciudad) VALUES(2,'Jerez','LUZ','Jerez de la Frontera')")
+        db.execute("INSERT INTO usuarios_empresas(usuario_id,empresa_id,permisos) VALUES(1,1,'admin')")
+        db.execute("INSERT INTO usuarios_empresas(usuario_id,empresa_id,permisos) VALUES(1,2,'admin')")
+        db.commit(); print('✅ DB initialized with seed data')
+    db.close()
+
+if __name__ == '__main__':
+    init_db()
+    port = int(os.environ.get('PORT', 5001))
+    print(f'\n  MATSEBIAN ERP v2.0\n  http://localhost:{port}\n  Login: daniel@matsebian.com / admin123\n')
+    app.run(host='0.0.0.0', port=port, debug=True)
