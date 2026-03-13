@@ -347,6 +347,18 @@ def init_db():
     if db.execute('SELECT COUNT(*) FROM usuarios').fetchone()[0] == 0:
         pw = generate_password_hash('admin123')
         db.execute('INSERT INTO usuarios(email,password_hash,nombre,rol) VALUES(?,?,?,?)', ('daniel@matsebian.com',pw,'Daniel','admin'))
+        # Migraciones: añadir columnas nuevas si no existen
+        for col, typedef in [
+            ('cif_proveedor', 'TEXT'),
+            ('num_factura',   'TEXT'),
+            ('local',         'TEXT'),
+            ('acreedor',      'TEXT'),
+        ]:
+            try:
+                db.execute(f'ALTER TABLE transactions ADD COLUMN {col} {typedef}')
+            except Exception:
+                pass  # ya existe
+        db.commit()
         db.execute("INSERT INTO empresas(nombre,nombre_corto,cif,tipo,color) VALUES(?,?,?,?,?)", ('Las Adelitas - Sabores Adelita S.L.','adelitas','B12345678','restaurante','#00ff88'))
         db.execute("INSERT INTO empresas(nombre,nombre_corto,tipo,color) VALUES(?,?,?,?)", ("Carl's Jr - Morenlonia S.L.",'carlsjr','franquicia','#ff6600'))
         db.execute("INSERT INTO locales(empresa_id,nombre,nombre_corto,ciudad) VALUES(1,'Las Adelitas Madrid','LAD','Madrid')")
