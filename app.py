@@ -340,6 +340,8 @@ def init_db():
         db.commit(); print('✅ DB initialized with seed data')
     db.close()
 
+init_db()
+
 if __name__ == '__main__':
     init_db()
     port = int(os.environ.get('PORT', 5001))
