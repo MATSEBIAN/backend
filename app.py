@@ -301,8 +301,8 @@ def set_apikey():
 @login_required
 def dashboard(eid):
     w=['f.empresa_id=%s']; p=[eid]
-    if request.args.get('year"): w.append("TO_CHAR(f.fecha::date,'YYYY')=%s"); p.append(request.args["year'])
-    if request.args.get('month"): w.append("TO_CHAR(f.fecha::date,'YYYY-MM')=%s"); p.append(request.args["month'])
+    if request.args.get('year'): w.append("TO_CHAR(f.fecha::date,'YYYY')=%s"); p.append(request.args['year'])
+    if request.args.get('month'): w.append("TO_CHAR(f.fecha::date,'YYYY-MM')=%s"); p.append(request.args['month'])
     if request.args.get('local_id'): w.append('f.local_id=%s'); p.append(int(request.args['local_id']))
     ws = ' AND '.join(w)
     s = qry(f'SELECT COUNT(*) as tf, COALESCE(SUM(base),0) as tb, COALESCE(SUM(iva),0) as ti, COALESCE(SUM(total),0) as tg, COALESCE(SUM(irpf),0) as tr FROM facturas f WHERE {ws}', p, one=True)
@@ -389,8 +389,8 @@ def list_transactions():
     sql = "SELECT t.*, tc.name as category FROM transactions t LEFT JOIN transaction_categories tc ON t.category_id=tc.id WHERE t.empresa_id=%s"
     args = [eid]
     if d.get('type'):  sql += ' AND t.type=%s';  args.append(d['type'])
-    if d.get('month"): sql += " AND TO_CHAR(t.transaction_date::date,'MM')=%s"; args.append(str(d["month']).zfill(2))
-    if d.get('year"):  sql += " AND TO_CHAR(t.transaction_date::date,'YYYY')=%s"; args.append(str(d["year']))
+    if d.get('month'): sql += " AND TO_CHAR(t.transaction_date::date,'MM')=%s"; args.append(str(d['month']).zfill(2))
+    if d.get('year'):  sql += " AND TO_CHAR(t.transaction_date::date,'YYYY')=%s"; args.append(str(d['year']))
     sql += ' ORDER BY t.transaction_date DESC, t.id DESC'
     return jsonify(qry(sql, args))
 
