@@ -566,7 +566,7 @@ def generate_report(year, month):
     import anthropic
     eid = get_first_empresa(session['user_id'])
     if not eid: return jsonify({'error': 'No empresa'}), 400
-    rows = qry("SELECT * FROM transactions WHERE empresa_id=%s AND TO_CHAR(transaction_date::date,'YYYY')=%s AND TO_CHAR(transaction_date::date,"MM')=%s',
+    rows = qry("SELECT * FROM transactions WHERE empresa_id=%s AND TO_CHAR(transaction_date::date,'YYYY')=%s AND TO_CHAR(transaction_date::date,'MM')=%s",
                [eid, str(year), str(month).zfill(2)])
     ingresos = sum(r['amount'] for r in rows if r['type']=='income')
     gastos   = sum(r['amount'] for r in rows if r['type']=='expense')
