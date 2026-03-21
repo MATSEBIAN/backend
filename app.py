@@ -3,10 +3,11 @@ Matsebian ERP v2.0 - Backend API
 Flask + SQLite (puro, sin SQLAlchemy)
 Solo requiere: flask, openpyxl, werkzeug (ya instalados)
 """
-import os, re, json, base64, sqlite3, traceback, urllib.request, urllib.error
+import os, re, json, base64, traceback, urllib.request, urllib.error
+import psycopg2, psycopg2.extras
 from datetime import datetime
+import datetime as _dt
 import jwt as pyjwt
-import datetime
 from functools import wraps
 from flask import Flask, request, jsonify, session, send_from_directory, g
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -18,7 +19,7 @@ app.config['SESSION_COOKIE_SAMESITE'] = 'None'
 app.config['SESSION_COOKIE_SECURE'] = True
 JWT_SECRET = os.environ.get('JWT_SECRET', 'matsebian-jwt-secret-2026')
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'matsebian-erp-dev-2026')
-app.config['DATABASE'] = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'matsebian_erp.db')
+DATABASE_URL = os.environ.get('DATABASE_URL', '')
 app.config['UPLOAD_FOLDER'] = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads')
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
@@ -26,10 +27,7 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 # === DB Helpers ===
 def get_db():
     if 'db' not in g:
-        g.db = sqlite3.connect(app.config['DATABASE'])
-        g.db.row_factory = sqlite3.Row
-        g.db.execute("PRAGMA journal_mode=WAL")
-        g.db.execute("PRAGMA foreign_keys=ON")
+        g.db = psycopg2.connect(DATABASE_URL)
     return g.db
 
 @app.teardown_appcontext
@@ -38,12 +36,23 @@ def close_db(exc):
     if db: db.close()
 
 def qry(sql, args=(), one=False):
-    cur = get_db().execute(sql, args)
-    rv = [dict(row) for row in cur.fetchall()]
+    db = get_db()
+    with db.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(sql, list(args) if args else None)
+        rv = [dict(row) for row in cur.fetchall()]
     return rv[0] if one and rv else (None if one else rv)
 
 def exe(sql, args=()):
-    db = get_db(); cur = db.execute(sql, args); db.commit(); return cur.lastrowid
+    db = get_db()
+    with db.cursor() as cur:
+        if sql.strip().upper().startswith('INSERT'):
+            cur.execute(sql + ' RETURNING id', list(args) if args else None)
+            last_id = cur.fetchone()[0]
+        else:
+            cur.execute(sql, list(args) if args else None)
+            last_id = None
+    db.commit()
+    return last_id
 
 # === CORS manual ===
 @app.after_request
@@ -74,19 +83,19 @@ def login_required(f):
     return d
 
 def get_user_empresas(uid):
-    empresas = qry('SELECT e.*, ue.permisos FROM empresas e JOIN usuarios_empresas ue ON e.id=ue.empresa_id WHERE ue.usuario_id=? AND e.activo=1', [uid])
+    empresas = qry('SELECT e.*, ue.permisos FROM empresas e JOIN usuarios_empresas ue ON e.id=ue.empresa_id WHERE ue.usuario_id=%s AND e.activo=1', [uid])
     for e in empresas:
-        e['locales'] = qry('SELECT * FROM locales WHERE empresa_id=? AND activo=1', [e['id']])
+        e['locales'] = qry('SELECT * FROM locales WHERE empresa_id=%s AND activo=1', [e['id']])
     return empresas
 
 @app.route('/api/auth/login', methods=['POST'])
 def login():
     d = request.get_json()
-    u = qry('SELECT * FROM usuarios WHERE email=? AND activo=1', [d.get('email','').strip().lower()], one=True)
+    u = qry('SELECT * FROM usuarios WHERE email=%s AND activo=1', [d.get('email','').strip().lower()], one=True)
     if not u or not check_password_hash(u['password_hash'], d.get('password','')):
         return jsonify({'error': 'Credenciales incorrectas'}), 401
     session['user_id'] = u['id']
-    token = pyjwt.encode({'user_id': u['id'], 'exp': datetime.datetime.utcnow() + datetime.timedelta(days=30)}, JWT_SECRET, algorithm='HS256')
+    token = pyjwt.encode({'user_id': u['id'], 'exp': _dt.datetime.utcnow() + _dt.timedelta(days=30)}, JWT_SECRET, algorithm='HS256')
     return jsonify({'user': {k:u[k] for k in ['id','email','nombre','rol']}, 'empresas': get_user_empresas(u['id']), 'token': token, 'access_token': token, 'company': get_user_empresas(u['id'])[0] if get_user_empresas(u['id']) else None})
 
 @app.route('/api/auth/logout', methods=['POST'])
@@ -95,7 +104,7 @@ def logout(): session.clear(); return jsonify({'ok': True})
 @app.route('/api/auth/me')
 @login_required
 def me():
-    u = qry('SELECT * FROM usuarios WHERE id=?', [session['user_id']], one=True)
+    u = qry('SELECT * FROM usuarios WHERE id=%s', [session['user_id']], one=True)
     if not u: return jsonify({'error': 'No encontrado'}), 401
     return jsonify({'user': {k:u[k] for k in ['id','email','nombre','rol']}, 'empresas': get_user_empresas(u['id'])})
 
@@ -108,36 +117,36 @@ def list_empresas(): return jsonify(get_user_empresas(session['user_id']))
 @login_required
 def create_empresa():
     d = request.get_json()
-    eid = exe('INSERT INTO empresas(nombre,nombre_corto,cif,tipo,color) VALUES(?,?,?,?,?)',
+    eid = exe('INSERT INTO empresas(nombre,nombre_corto,cif,tipo,color) VALUES(%s,%s,%s,%s,%s)',
               [d['nombre'], d.get('nombre_corto',''), d.get('cif'), d.get('tipo','restaurante'), d.get('color','#00ff88')])
-    exe('INSERT INTO usuarios_empresas(usuario_id,empresa_id,permisos) VALUES(?,?,?)', [session['user_id'], eid, 'admin'])
+    exe('INSERT INTO usuarios_empresas(usuario_id,empresa_id,permisos) VALUES(%s,%s,%s)', [session['user_id'], eid, 'admin'])
     for loc in d.get('locales', []):
-        exe('INSERT INTO locales(empresa_id,nombre,nombre_corto,ciudad) VALUES(?,?,?,?)',
+        exe('INSERT INTO locales(empresa_id,nombre,nombre_corto,ciudad) VALUES(%s,%s,%s,%s)',
             [eid, loc['nombre'], loc.get('nombre_corto'), loc.get('ciudad')])
-    return jsonify(qry('SELECT * FROM empresas WHERE id=?', [eid], one=True)), 201
+    return jsonify(qry('SELECT * FROM empresas WHERE id=%s', [eid], one=True)), 201
 
 # === Locales ===
 @app.route('/api/empresas/<int:eid>/locales')
 @login_required
-def list_locales(eid): return jsonify(qry('SELECT * FROM locales WHERE empresa_id=? AND activo=1', [eid]))
+def list_locales(eid): return jsonify(qry('SELECT * FROM locales WHERE empresa_id=%s AND activo=1', [eid]))
 
 @app.route('/api/empresas/<int:eid>/locales', methods=['POST'])
 @login_required
 def create_local(eid):
     d = request.get_json()
-    lid = exe('INSERT INTO locales(empresa_id,nombre,nombre_corto,ciudad) VALUES(?,?,?,?)',
+    lid = exe('INSERT INTO locales(empresa_id,nombre,nombre_corto,ciudad) VALUES(%s,%s,%s,%s)',
               [eid, d['nombre'], d.get('nombre_corto'), d.get('ciudad')])
-    return jsonify(qry('SELECT * FROM locales WHERE id=?', [lid], one=True)), 201
+    return jsonify(qry('SELECT * FROM locales WHERE id=%s', [lid], one=True)), 201
 
 # === Facturas ===
 @app.route('/api/empresas/<int:eid>/facturas')
 @login_required
 def list_facturas(eid):
-    sql = 'SELECT f.*, l.nombre as local_nombre FROM facturas f LEFT JOIN locales l ON f.local_id=l.id WHERE f.empresa_id=?'
+    sql = 'SELECT f.*, l.nombre as local_nombre FROM facturas f LEFT JOIN locales l ON f.local_id=l.id WHERE f.empresa_id=%s'
     p = [eid]
-    if request.args.get('year'): sql += ' AND strftime("%%Y",f.fecha)=?'; p.append(request.args['year'])
-    if request.args.get('month'): sql += ' AND strftime("%%Y-%%m",f.fecha)=?'; p.append(request.args['month'])
-    if request.args.get('local_id'): sql += ' AND f.local_id=?'; p.append(int(request.args['local_id']))
+    if request.args.get('year'): sql += ' AND TO_CHAR(f.fecha::date,'YYYY')=%s'; p.append(request.args['year'])
+    if request.args.get('month'): sql += ' AND TO_CHAR(f.fecha::date,'YYYY-MM')=%s'; p.append(request.args['month'])
+    if request.args.get('local_id'): sql += ' AND f.local_id=%s'; p.append(int(request.args['local_id']))
     return jsonify(qry(sql + ' ORDER BY f.fecha DESC', p))
 
 @app.route('/api/empresas/<int:eid>/facturas', methods=['POST'])
@@ -147,19 +156,19 @@ def create_factura(eid):
     local_id = d.get('local_id')
     if not local_id and d.get('local_nombre'):
         n = d['local_nombre'].upper()
-        for l in qry('SELECT * FROM locales WHERE empresa_id=? AND activo=1', [eid]):
+        for l in qry('SELECT * FROM locales WHERE empresa_id=%s AND activo=1', [eid]):
             if l['nombre'].upper() in n or n in l['nombre'].upper() or (l['nombre_corto'] and l['nombre_corto'].upper() in n):
                 local_id = l['id']; break
-    fid = exe('INSERT INTO facturas(empresa_id,local_id,fecha,num_factura,proveedor,cif_proveedor,concepto,base,iva,irpf,total,origen) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+    fid = exe('INSERT INTO facturas(empresa_id,local_id,fecha,num_factura,proveedor,cif_proveedor,concepto,base,iva,irpf,total,origen) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)',
               [eid, local_id, d.get('fecha',datetime.now().strftime('%Y-%m-%d')), d.get('num_factura'), d.get('proveedor','?'),
                d.get('cif_proveedor'), d.get('concepto'), float(d.get('base',0)), float(d.get('iva',0)),
                float(d.get('irpf',0)), float(d.get('total',0)), d.get('origen','manual')])
-    return jsonify(qry('SELECT * FROM facturas WHERE id=?', [fid], one=True)), 201
+    return jsonify(qry('SELECT * FROM facturas WHERE id=%s', [fid], one=True)), 201
 
 @app.route('/api/empresas/<int:eid>/facturas/<int:fid>', methods=['DELETE'])
 @login_required
 def delete_factura(eid, fid):
-    exe('DELETE FROM facturas WHERE id=? AND empresa_id=?', [fid, eid]); return jsonify({'ok': True})
+    exe('DELETE FROM facturas WHERE id=%s AND empresa_id=%s', [fid, eid]); return jsonify({'ok': True})
 
 # === Import Excel ===
 @app.route('/api/empresas/<int:eid>/importar-excel', methods=['POST'])
@@ -178,7 +187,7 @@ def importar_excel(eid):
         for k, ns in aliases.items():
             for i, h in enumerate(hdrs):
                 if h in ns: ci[k]=i; break
-        locales = qry('SELECT * FROM locales WHERE empresa_id=? AND activo=1', [eid])
+        locales = qry('SELECT * FROM locales WHERE empresa_id=%s AND activo=1', [eid])
         db = get_db(); imp = 0; errs = []
         for ri, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
             try:
@@ -200,11 +209,14 @@ def importar_excel(eid):
                 for l in locales:
                     if l['nombre'].upper() in loc_raw or loc_raw in l['nombre'].upper() or (l['nombre_corto'] and l['nombre_corto'].upper() in loc_raw):
                         lid=l['id']; break
-                db.execute('INSERT INTO facturas(empresa_id,local_id,fecha,num_factura,proveedor,cif_proveedor,concepto,base,iva,irpf,total,origen) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+                exe('INSERT INTO facturas(empresa_id,local_id,fecha,num_factura,proveedor,cif_proveedor,concepto,base,iva,irpf,total,origen) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)',
                     [eid, lid, fecha, str(v('NFACT') or '') or None, prov, str(v('CIF') or '') or None,
                      str(v('P&L') or ''), float(v('BASE') or 0), float(v('IVA') or 0), float(v('IRPF') or 0), float(v('TOTAL') or 0), 'excel'])
                 imp += 1
-            except Exception as e: errs.append(f'Fila {ri}: {e}')
+            except Exception as e:
+                try: get_db().rollback()
+                except: pass
+                errs.append(f'Fila {ri}: {e}')
         db.commit()
         return jsonify({'ok':True, 'imported':imp, 'errors':errs[:10]})
     except Exception as e: traceback.print_exc(); return jsonify({'error':str(e)}), 500
@@ -213,19 +225,19 @@ def importar_excel(eid):
 @app.route('/api/empresas/<int:eid>/ventas')
 @login_required
 def list_ventas(eid):
-    sql = 'SELECT v.*, l.nombre as local_nombre FROM ventas_periodo v LEFT JOIN locales l ON v.local_id=l.id WHERE v.empresa_id=?'
+    sql = 'SELECT v.*, l.nombre as local_nombre FROM ventas_periodo v LEFT JOIN locales l ON v.local_id=l.id WHERE v.empresa_id=%s'
     p = [eid]
-    if request.args.get('periodo'): sql += ' AND v.periodo=?'; p.append(request.args['periodo'])
+    if request.args.get('periodo'): sql += ' AND v.periodo=%s'; p.append(request.args['periodo'])
     return jsonify(qry(sql + ' ORDER BY v.periodo DESC', p))
 
 @app.route('/api/empresas/<int:eid>/ventas', methods=['POST'])
 @login_required
 def upsert_ventas(eid):
     d = request.get_json(); per=d['periodo']; lid=d.get('local_id')
-    ex = qry('SELECT id FROM ventas_periodo WHERE empresa_id=? AND periodo=? AND (local_id=? OR (local_id IS NULL AND ? IS NULL))', [eid,per,lid,lid], one=True)
-    if ex: exe('UPDATE ventas_periodo SET ventas_total=?, coste_laboral=? WHERE id=?', [float(d.get('ventas_total',0)), float(d.get('coste_laboral',0)), ex['id']]); vid=ex['id']
-    else: vid = exe('INSERT INTO ventas_periodo(empresa_id,local_id,periodo,ventas_total,coste_laboral) VALUES(?,?,?,?,?)', [eid,lid,per,float(d.get('ventas_total',0)),float(d.get('coste_laboral',0))])
-    return jsonify(qry('SELECT * FROM ventas_periodo WHERE id=?', [vid], one=True))
+    ex = (qry('SELECT id FROM ventas_periodo WHERE empresa_id=%s AND periodo=%s AND local_id=%s', [eid,per,lid], one=True) if lid else qry('SELECT id FROM ventas_periodo WHERE empresa_id=%s AND periodo=%s AND local_id IS NULL', [eid,per], one=True))
+    if ex: exe('UPDATE ventas_periodo SET ventas_total=%s, coste_laboral=%s WHERE id=%s', [float(d.get('ventas_total',0)), float(d.get('coste_laboral',0)), ex['id']]); vid=ex['id']
+    else: vid = exe('INSERT INTO ventas_periodo(empresa_id,local_id,periodo,ventas_total,coste_laboral) VALUES(%s,%s,%s,%s,%s)', [eid,lid,per,float(d.get('ventas_total',0)),float(d.get('coste_laboral',0))])
+    return jsonify(qry('SELECT * FROM ventas_periodo WHERE id=%s', [vid], one=True))
 
 # === OCR ===
 @app.route('/api/empresas/<int:eid>/ocr', methods=['POST'])
@@ -237,7 +249,7 @@ def ocr_factura(eid):
     img = d.get('image','')
     if not img: return jsonify({'error': 'No image'}), 400
     if ',' in img: img = img.split(',')[1]
-    locales = qry('SELECT * FROM locales WHERE empresa_id=? AND activo=1', [eid])
+    locales = qry('SELECT * FROM locales WHERE empresa_id=%s AND activo=1', [eid])
     loc_text = ', '.join([f"{l['nombre']} ({l['nombre_corto']})" if l['nombre_corto'] else l['nombre'] for l in locales])
     body = json.dumps({
         "model": "claude-sonnet-4-20250514", "max_tokens": 2000,
@@ -288,17 +300,17 @@ def set_apikey():
 @app.route('/api/empresas/<int:eid>/dashboard')
 @login_required
 def dashboard(eid):
-    w=['f.empresa_id=?']; p=[eid]
-    if request.args.get('year'): w.append('strftime("%%Y",f.fecha)=?'); p.append(request.args['year'])
-    if request.args.get('month'): w.append('strftime("%%Y-%%m",f.fecha)=?'); p.append(request.args['month'])
-    if request.args.get('local_id'): w.append('f.local_id=?'); p.append(int(request.args['local_id']))
+    w=['f.empresa_id=%s']; p=[eid]
+    if request.args.get('year'): w.append('TO_CHAR(f.fecha::date,'YYYY')=%s'); p.append(request.args['year'])
+    if request.args.get('month'): w.append('TO_CHAR(f.fecha::date,'YYYY-MM')=%s'); p.append(request.args['month'])
+    if request.args.get('local_id'): w.append('f.local_id=%s'); p.append(int(request.args['local_id']))
     ws = ' AND '.join(w)
     s = qry(f'SELECT COUNT(*) as tf, COALESCE(SUM(base),0) as tb, COALESCE(SUM(iva),0) as ti, COALESCE(SUM(total),0) as tg, COALESCE(SUM(irpf),0) as tr FROM facturas f WHERE {ws}', p, one=True)
     # Ventas
-    vw=['v.empresa_id=?']; vp=[eid]
-    if request.args.get('month'): vw.append('v.periodo=?'); vp.append(request.args['month'])
-    elif request.args.get('year'): vw.append('v.periodo LIKE ?'); vp.append(f"{request.args['year']}-%")
-    if request.args.get('local_id'): vw.append('v.local_id=?'); vp.append(int(request.args['local_id']))
+    vw=['v.empresa_id=%s']; vp=[eid]
+    if request.args.get('month'): vw.append('v.periodo=%s'); vp.append(request.args['month'])
+    elif request.args.get('year'): vw.append('v.periodo LIKE %s'); vp.append(f"{request.args['year']}-%")
+    if request.args.get('local_id'): vw.append('v.local_id=%s'); vp.append(int(request.args['local_id']))
     vd = qry(f"SELECT v.*, l.nombre as ln FROM ventas_periodo v LEFT JOIN locales l ON v.local_id=l.id WHERE {' AND '.join(vw)}", vp)
     tv=sum(v['ventas_total'] for v in vd); tc=sum(v['coste_laboral'] for v in vd)
     ga=abs(s['tg']); rc=tv-tc-ga
@@ -312,13 +324,13 @@ def dashboard(eid):
         'graficos': {
             'por_proveedor': qry(f'SELECT proveedor as nombre, SUM(ABS(total)) as total FROM facturas f WHERE {ws} GROUP BY proveedor ORDER BY total DESC LIMIT 10', p),
             'por_categoria': qry(f'SELECT COALESCE(concepto,"Sin cat") as nombre, SUM(ABS(total)) as total FROM facturas f WHERE {ws} GROUP BY concepto ORDER BY total DESC LIMIT 10', p),
-            'por_mes': qry(f'SELECT strftime("%%Y-%%m",fecha) as mes, SUM(ABS(total)) as total FROM facturas f WHERE {ws} GROUP BY mes ORDER BY mes', p),
+            'por_mes': qry(f'SELECT TO_CHAR(fecha::date,'YYYY-MM') as mes, SUM(ABS(total)) as total FROM facturas f WHERE {ws} GROUP BY mes ORDER BY mes', p),
             'por_local': qry(f'SELECT COALESCE(l.nombre,"Sin local") as nombre, SUM(ABS(f.total)) as total FROM facturas f LEFT JOIN locales l ON f.local_id=l.id WHERE {ws} GROUP BY l.nombre ORDER BY total DESC', p),
         },
         'filtros_disponibles': {
-            'years': [r['y'] for r in qry('SELECT DISTINCT strftime("%%Y",fecha) as y FROM facturas WHERE empresa_id=? ORDER BY y', [eid])],
-            'months': [r['m'] for r in qry('SELECT DISTINCT strftime("%%Y-%%m",fecha) as m FROM facturas WHERE empresa_id=? ORDER BY m', [eid])],
-            'locales': qry('SELECT id, nombre FROM locales WHERE empresa_id=? AND activo=1', [eid])
+            'years': [r['y'] for r in qry('SELECT DISTINCT TO_CHAR(fecha::date,'YYYY') as y FROM facturas WHERE empresa_id=%s ORDER BY y', [eid])],
+            'months': [r['m'] for r in qry('SELECT DISTINCT TO_CHAR(fecha::date,'YYYY-MM') as m FROM facturas WHERE empresa_id=%s ORDER BY m', [eid])],
+            'locales': qry('SELECT id, nombre FROM locales WHERE empresa_id=%s AND activo=1', [eid])
         }
     })
 
@@ -328,74 +340,44 @@ def index(): return send_from_directory(app.static_folder, 'index.html')
 
 # === Init DB ===
 def init_db():
-    db = sqlite3.connect(app.config['DATABASE'])
-    db.executescript('''
-        CREATE TABLE IF NOT EXISTS usuarios(id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, nombre TEXT NOT NULL, rol TEXT DEFAULT 'admin', activo INTEGER DEFAULT 1, created_at TEXT DEFAULT(datetime('now')));
-        CREATE TABLE IF NOT EXISTS empresas(id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL, nombre_corto TEXT NOT NULL, cif TEXT, tipo TEXT DEFAULT 'restaurante', moneda TEXT DEFAULT 'EUR', iva_por_defecto REAL DEFAULT 10.0, color TEXT DEFAULT '#00ff88', activo INTEGER DEFAULT 1, created_at TEXT DEFAULT(datetime('now')));
-        CREATE TABLE IF NOT EXISTS locales(id INTEGER PRIMARY KEY AUTOINCREMENT, empresa_id INTEGER NOT NULL REFERENCES empresas(id), nombre TEXT NOT NULL, nombre_corto TEXT, direccion TEXT, ciudad TEXT, activo INTEGER DEFAULT 1, created_at TEXT DEFAULT(datetime('now')));
-        CREATE TABLE IF NOT EXISTS categorias_gasto(id INTEGER PRIMARY KEY AUTOINCREMENT, empresa_id INTEGER NOT NULL REFERENCES empresas(id), codigo TEXT NOT NULL, nombre TEXT NOT NULL, grupo TEXT, activo INTEGER DEFAULT 1);
-        CREATE TABLE IF NOT EXISTS facturas(id INTEGER PRIMARY KEY AUTOINCREMENT, empresa_id INTEGER NOT NULL REFERENCES empresas(id), local_id INTEGER REFERENCES locales(id), categoria_id INTEGER REFERENCES categorias_gasto(id), fecha TEXT NOT NULL, num_factura TEXT, proveedor TEXT NOT NULL, cif_proveedor TEXT, concepto TEXT, base REAL DEFAULT 0, iva REAL DEFAULT 0, irpf REAL DEFAULT 0, total REAL DEFAULT 0, notas TEXT, documento_path TEXT, origen TEXT DEFAULT 'manual', created_at TEXT DEFAULT(datetime('now')), updated_at TEXT DEFAULT(datetime('now')));
-        CREATE TABLE IF NOT EXISTS ventas_periodo(id INTEGER PRIMARY KEY AUTOINCREMENT, empresa_id INTEGER NOT NULL REFERENCES empresas(id), local_id INTEGER REFERENCES locales(id), periodo TEXT NOT NULL, ventas_total REAL DEFAULT 0, coste_laboral REAL DEFAULT 0, notas TEXT, created_at TEXT DEFAULT(datetime('now')), UNIQUE(empresa_id,local_id,periodo));
-        CREATE TABLE IF NOT EXISTS usuarios_empresas(id INTEGER PRIMARY KEY AUTOINCREMENT, usuario_id INTEGER NOT NULL REFERENCES usuarios(id), empresa_id INTEGER NOT NULL REFERENCES empresas(id), permisos TEXT DEFAULT 'admin', UNIQUE(usuario_id,empresa_id));
-        CREATE INDEX IF NOT EXISTS idx_f_emp ON facturas(empresa_id);
-        CREATE INDEX IF NOT EXISTS idx_f_fecha ON facturas(fecha);
-        CREATE INDEX IF NOT EXISTS idx_f_local ON facturas(local_id);
-        CREATE TABLE IF NOT EXISTS transactions(id INTEGER PRIMARY KEY AUTOINCREMENT, empresa_id INTEGER NOT NULL REFERENCES empresas(id), type TEXT NOT NULL DEFAULT 'expense', amount REAL NOT NULL DEFAULT 0, description TEXT, payment_method TEXT DEFAULT 'cash', transaction_date TEXT NOT NULL, category_id INTEGER, vendor_client TEXT, tax_amount REAL DEFAULT 0, notes TEXT, source TEXT DEFAULT 'manual', cif_proveedor TEXT, num_factura TEXT, local TEXT, acreedor TEXT, created_at TEXT DEFAULT(datetime('now')));
-        CREATE TABLE IF NOT EXISTS reports (id INTEGER PRIMARY KEY AUTOINCREMENT, empresa_id INTEGER, year INTEGER, month INTEGER, content TEXT, income REAL DEFAULT 0, expenses REAL DEFAULT 0, created_at TEXT);
-        CREATE TABLE IF NOT EXISTS transaction_categories(id INTEGER PRIMARY KEY AUTOINCREMENT, empresa_id INTEGER NOT NULL REFERENCES empresas(id), name TEXT NOT NULL, type TEXT DEFAULT 'both', activo INTEGER DEFAULT 1);
-    ''')
-    if db.execute('SELECT COUNT(*) FROM usuarios').fetchone()[0] == 0:
-        pw = generate_password_hash('admin123')
-        db.execute('INSERT INTO usuarios(email,password_hash,nombre,rol) VALUES(?,?,?,?)', ('daniel@matsebian.com',pw,'Daniel','admin'))
-        # Migraciones: añadir columnas nuevas si no existen
-        for col, typedef in [
-            ('cif_proveedor', 'TEXT'),
-            ('num_factura',   'TEXT'),
-            ('local',         'TEXT'),
-            ('acreedor',      'TEXT'),
-            ('concepto',      'TEXT'),
-            ('albaran_irpf',  'TEXT'),
-            ('revisado',      'TEXT'),
-            ('pagado',        'TEXT'),
-            ('nota2',         'TEXT'),
-            ('nota3',         'TEXT'),
-        ]:
-            try:
-                db.execute(f'ALTER TABLE transactions ADD COLUMN {col} {typedef}')
-            except Exception:
-                pass  # ya existe
-        db.commit()
-        # Seed categorías Las Adelitas
-        cats = [
-            ('1.1','SUPERMERCADO','expense'),('1.2','COMIDA','expense'),('1.3','FRUTA Y VERDURA','expense'),
-            ('2.1','CERVEZA','expense'),('2.2','OTROS BEBIDAS','expense'),('2.3','REFRESCOS','expense'),
-            ('3.1','PRODUCTO OTROS','expense'),
-            ('4.1','SALARIO','expense'),('4.2','OTROS SALARIO','expense'),
-            ('5.1','GLOVO','expense'),('5.2','UBER','expense'),
-            ('6.1','LICENCIAS INFORMATICA','expense'),('6.2','MANTENIMIENTOS','expense'),('6.3','REPARACIONES','expense'),
-            ('7.1','LUZ','expense'),('7.2','CARTONAJE Y CONSUMIBLES','expense'),('7.3','AGUA','expense'),
-            ('7.4','GAS','expense'),('7.5','TELEFONO Y ADSL','expense'),('7.6','OTROS SERVICIOS','expense'),
-            ('8.1','ALQUILER','expense'),('8.2','ALQUILER OTROS','expense'),
-            ('9.1','ROYALTY','expense'),('9.2','FONDO MARKETING','expense'),('9.3','LOCAL STORE MARKETING','expense'),
-            ('10.1','PRESTAMOS','expense'),('10.2','GESTORIA LABORAL','expense'),('10.3','ABOGADOS','expense'),
-            ('10.4','GESTORIA FISCAL','expense'),('10.5','EMPRESA OTROS','expense'),
-        ]
-        for codigo, nombre, tipo in cats:
-            db.execute('INSERT INTO transaction_categories(empresa_id,name,type) VALUES(?,?,?)', (1, f'{codigo} {nombre}', tipo))
-        db.execute("INSERT INTO empresas(nombre,nombre_corto,cif,tipo,color) VALUES(?,?,?,?,?)", ('Las Adelitas - Sabores Adelita S.L.','adelitas','B12345678','restaurante','#00ff88'))
-        db.execute("INSERT INTO empresas(nombre,nombre_corto,tipo,color) VALUES(?,?,?,?)", ("Carl's Jr - Morenlonia S.L.",'carlsjr','franquicia','#ff6600'))
-        db.execute("INSERT INTO locales(empresa_id,nombre,nombre_corto,ciudad) VALUES(1,'Las Adelitas Madrid','LAD','Madrid')")
-        db.execute("INSERT INTO locales(empresa_id,nombre,nombre_corto,ciudad) VALUES(2,'Dos Hermanas','WAY','Dos Hermanas')")
-        db.execute("INSERT INTO locales(empresa_id,nombre,nombre_corto,ciudad) VALUES(2,'Jerez','LUZ','Jerez de la Frontera')")
-        db.execute("INSERT INTO usuarios_empresas(usuario_id,empresa_id,permisos) VALUES(1,1,'admin')")
-        db.execute("INSERT INTO usuarios_empresas(usuario_id,empresa_id,permisos) VALUES(1,2,'admin')")
-        db.commit(); print('✅ DB initialized with seed data')
-    db.close()
-
-
+    conn = psycopg2.connect(DATABASE_URL)
+    cur = conn.cursor()
+    for sql in [
+        "CREATE TABLE IF NOT EXISTS usuarios(id SERIAL PRIMARY KEY, email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, nombre TEXT NOT NULL, rol TEXT DEFAULT 'admin', activo INTEGER DEFAULT 1, created_at TIMESTAMP DEFAULT NOW())",
+        "CREATE TABLE IF NOT EXISTS empresas(id SERIAL PRIMARY KEY, nombre TEXT NOT NULL, nombre_corto TEXT NOT NULL, cif TEXT, tipo TEXT DEFAULT 'restaurante', moneda TEXT DEFAULT 'EUR', iva_por_defecto REAL DEFAULT 10.0, color TEXT DEFAULT '#00ff88', activo INTEGER DEFAULT 1, created_at TIMESTAMP DEFAULT NOW())",
+        "CREATE TABLE IF NOT EXISTS locales(id SERIAL PRIMARY KEY, empresa_id INTEGER NOT NULL REFERENCES empresas(id), nombre TEXT NOT NULL, nombre_corto TEXT, direccion TEXT, ciudad TEXT, activo INTEGER DEFAULT 1, created_at TIMESTAMP DEFAULT NOW())",
+        "CREATE TABLE IF NOT EXISTS categorias_gasto(id SERIAL PRIMARY KEY, empresa_id INTEGER NOT NULL REFERENCES empresas(id), codigo TEXT NOT NULL, nombre TEXT NOT NULL, grupo TEXT, activo INTEGER DEFAULT 1)",
+        "CREATE TABLE IF NOT EXISTS facturas(id SERIAL PRIMARY KEY, empresa_id INTEGER NOT NULL REFERENCES empresas(id), local_id INTEGER REFERENCES locales(id), categoria_id INTEGER, fecha TEXT NOT NULL, num_factura TEXT, proveedor TEXT NOT NULL, cif_proveedor TEXT, concepto TEXT, base REAL DEFAULT 0, iva REAL DEFAULT 0, irpf REAL DEFAULT 0, total REAL DEFAULT 0, notas TEXT, documento_path TEXT, origen TEXT DEFAULT 'manual', created_at TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW())",
+        "CREATE TABLE IF NOT EXISTS ventas_periodo(id SERIAL PRIMARY KEY, empresa_id INTEGER NOT NULL REFERENCES empresas(id), local_id INTEGER REFERENCES locales(id), periodo TEXT NOT NULL, ventas_total REAL DEFAULT 0, coste_laboral REAL DEFAULT 0, notas TEXT, created_at TIMESTAMP DEFAULT NOW())",
+        "CREATE TABLE IF NOT EXISTS usuarios_empresas(id SERIAL PRIMARY KEY, usuario_id INTEGER NOT NULL REFERENCES usuarios(id), empresa_id INTEGER NOT NULL REFERENCES empresas(id), permisos TEXT DEFAULT 'admin', UNIQUE(usuario_id,empresa_id))",
+        "CREATE INDEX IF NOT EXISTS idx_f_emp ON facturas(empresa_id)",
+        "CREATE INDEX IF NOT EXISTS idx_f_fecha ON facturas(fecha)",
+        "CREATE TABLE IF NOT EXISTS transactions(id SERIAL PRIMARY KEY, empresa_id INTEGER NOT NULL REFERENCES empresas(id), type TEXT NOT NULL DEFAULT 'expense', amount REAL NOT NULL DEFAULT 0, description TEXT, payment_method TEXT DEFAULT 'cash', transaction_date TEXT NOT NULL, category_id INTEGER, vendor_client TEXT, tax_amount REAL DEFAULT 0, notes TEXT, source TEXT DEFAULT 'manual', cif_proveedor TEXT, num_factura TEXT, local TEXT, acreedor TEXT, concepto TEXT, albaran_irpf TEXT, revisado TEXT, pagado TEXT, nota2 TEXT, nota3 TEXT, created_at TIMESTAMP DEFAULT NOW())",
+        "CREATE TABLE IF NOT EXISTS reports(id SERIAL PRIMARY KEY, empresa_id INTEGER, year INTEGER, month INTEGER, content TEXT, income REAL DEFAULT 0, expenses REAL DEFAULT 0, created_at TIMESTAMP DEFAULT NOW())",
+        "CREATE TABLE IF NOT EXISTS transaction_categories(id SERIAL PRIMARY KEY, empresa_id INTEGER NOT NULL REFERENCES empresas(id), name TEXT NOT NULL, type TEXT DEFAULT 'both', activo INTEGER DEFAULT 1)",
+    ]:
+        cur.execute(sql)
+    conn.commit()
+    cur.execute('SELECT COUNT(*) FROM usuarios')
+    if cur.fetchone()[0] == 0:
+        from werkzeug.security import generate_password_hash as gph
+        cur.execute('INSERT INTO usuarios(email,password_hash,nombre,rol) VALUES(%s,%s,%s,%s)', ('daniel@matsebian.com', gph('admin123'), 'Daniel', 'admin'))
+        cur.execute("INSERT INTO empresas(nombre,nombre_corto,cif,tipo,color) VALUES(%s,%s,%s,%s,%s)", ('Las Adelitas - Sabores Adelita S.L.','adelitas','B12345678','restaurante','#00ff88'))
+        cur.execute("INSERT INTO empresas(nombre,nombre_corto,tipo,color) VALUES(%s,%s,%s,%s)", ("Carl's Jr - Morenlonia S.L.",'carlsjr','franquicia','#ff6600'))
+        cur.execute("INSERT INTO locales(empresa_id,nombre,nombre_corto,ciudad) VALUES(1,'Las Adelitas Madrid','LAD','Madrid')")
+        cur.execute("INSERT INTO locales(empresa_id,nombre,nombre_corto,ciudad) VALUES(2,'Dos Hermanas','WAY','Dos Hermanas')")
+        cur.execute("INSERT INTO locales(empresa_id,nombre,nombre_corto,ciudad) VALUES(2,'Jerez','LUZ','Jerez de la Frontera')")
+        cur.execute("INSERT INTO usuarios_empresas(usuario_id,empresa_id,permisos) VALUES(1,1,'admin')")
+        cur.execute("INSERT INTO usuarios_empresas(usuario_id,empresa_id,permisos) VALUES(1,2,'admin')")
+        for codigo, nombre in [('1.1','SUPERMERCADO'),('1.2','COMIDA'),('1.3','FRUTA Y VERDURA'),('2.1','CERVEZA'),('2.2','OTROS BEBIDAS'),('2.3','REFRESCOS'),('3.1','PRODUCTO OTROS'),('4.1','SALARIO'),('4.2','OTROS SALARIO'),('5.1','GLOVO'),('5.2','UBER'),('6.1','LICENCIAS INFORMATICA'),('6.2','MANTENIMIENTOS'),('6.3','REPARACIONES'),('7.1','LUZ'),('7.2','CARTONAJE Y CONSUMIBLES'),('7.3','AGUA'),('7.4','GAS'),('7.5','TELEFONO Y ADSL'),('7.6','OTROS SERVICIOS'),('8.1','ALQUILER'),('8.2','ALQUILER OTROS'),('9.1','ROYALTY'),('9.2','FONDO MARKETING'),('9.3','LOCAL STORE MARKETING'),('10.1','PRESTAMOS'),('10.2','GESTORIA LABORAL'),('10.3','ABOGADOS'),('10.4','GESTORIA FISCAL'),('10.5','EMPRESA OTROS')]:
+            cur.execute('INSERT INTO transaction_categories(empresa_id,name,type) VALUES(%s,%s,%s)', (1, f'{codigo} {nombre}', 'expense'))
+        conn.commit()
+        print('✅ DB initialized')
+    cur.close()
+    conn.close()
 # TRANSACTIONS API
 def get_first_empresa(uid):
-    e = qry('SELECT empresa_id FROM usuarios_empresas WHERE usuario_id=? LIMIT 1', [uid], one=True)
+    e = qry('SELECT empresa_id FROM usuarios_empresas WHERE usuario_id=%s LIMIT 1', [uid], one=True)
     return e['empresa_id'] if e else None
 
 @app.route('/api/transactions/')
@@ -404,11 +386,11 @@ def list_transactions():
     eid = get_first_empresa(session['user_id'])
     if not eid: return jsonify([])
     d = request.args
-    sql = "SELECT t.*, tc.name as category FROM transactions t LEFT JOIN transaction_categories tc ON t.category_id=tc.id WHERE t.empresa_id=?"
+    sql = "SELECT t.*, tc.name as category FROM transactions t LEFT JOIN transaction_categories tc ON t.category_id=tc.id WHERE t.empresa_id=%s"
     args = [eid]
-    if d.get('type'):  sql += ' AND t.type=?';  args.append(d['type'])
-    if d.get('month'): sql += " AND strftime('%m', t.transaction_date)=?"; args.append(str(d['month']).zfill(2))
-    if d.get('year'):  sql += " AND strftime('%Y', t.transaction_date)=?"; args.append(str(d['year']))
+    if d.get('type'):  sql += ' AND t.type=%s';  args.append(d['type'])
+    if d.get('month'): sql += " AND TO_CHAR(t.transaction_date::date,'MM')=%s"; args.append(str(d['month']).zfill(2))
+    if d.get('year'):  sql += " AND TO_CHAR(t.transaction_date::date,'YYYY')=%s"; args.append(str(d['year']))
     sql += ' ORDER BY t.transaction_date DESC, t.id DESC'
     return jsonify(qry(sql, args))
 
@@ -420,9 +402,9 @@ def create_transaction():
     d = request.get_json()
     if not d or not d.get('amount') or not d.get('description'):
         return jsonify({'error': 'Faltan campos obligatorios'}), 400
-    exe("""INSERT INTO transactions(empresa_id,type,amount,description,payment_method,transaction_date,category_id,vendor_client,tax_amount,notes,source) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+    exe("""INSERT INTO transactions(empresa_id,type,amount,description,payment_method,transaction_date,category_id,vendor_client,tax_amount,notes,source) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
         [eid, d.get('type','expense'), float(d['amount']), d['description'],
-         d.get('payment_method','cash'), d.get('transaction_date', str(datetime.date.today())),
+         d.get('payment_method','cash'), d.get('transaction_date', str(_dt.date.today())),
          d.get('category_id'), d.get('vendor_client',''), float(d.get('tax_amount') or 0),
          d.get('notes',''), 'manual'])
     return jsonify({'ok': True}), 201
@@ -431,14 +413,14 @@ def create_transaction():
 @login_required
 def delete_transaction(tid):
     eid = get_first_empresa(session['user_id'])
-    exe('DELETE FROM transactions WHERE id=? AND empresa_id=?', [tid, eid])
+    exe('DELETE FROM transactions WHERE id=%s AND empresa_id=%s', [tid, eid])
     return jsonify({'ok': True})
 
 @app.route('/api/transactions/categories')
 @login_required
 def list_tx_categories():
     eid = get_first_empresa(session['user_id'])
-    return jsonify(qry('SELECT * FROM transaction_categories WHERE empresa_id=? AND activo=1', [eid]))
+    return jsonify(qry('SELECT * FROM transaction_categories WHERE empresa_id=%s AND activo=1', [eid]))
 
 @app.route('/api/transactions/<int:tid>', methods=['PATCH'])
 @login_required
@@ -447,11 +429,11 @@ def update_transaction(tid):
     allowed = ['vendor_client','local','transaction_date','description','concepto',
                'amount','tax_amount','albaran_irpf','revisado','pagado','notes',
                'nota2','nota3','cif_proveedor','num_factura','acreedor','category_id']
-    sets = [f'{k}=?' for k in d if k in allowed]
+    sets = [f'{k}=%s' for k in d if k in allowed]
     vals = [d[k] for k in d if k in allowed]
     if not sets: return jsonify({'ok':False}), 400
     eid = session.get('empresa_id') or (qry('SELECT id FROM empresas WHERE activo=1 LIMIT 1',[]) or [{}])[0].get('id',1)
-    exe(f'UPDATE transactions SET {",".join(sets)} WHERE id=? AND empresa_id=?',
+    exe(f'UPDATE transactions SET {",".join(sets)} WHERE id=%s AND empresa_id=%s',
         vals + [tid, eid])
     return jsonify({'ok': True})
 
@@ -460,7 +442,7 @@ def update_transaction(tid):
 def update_tx_category(tid):
     d = request.json
     eid = session.get('empresa_id') or (qry('SELECT id FROM empresas WHERE activo=1 LIMIT 1',[]) or [{}])[0].get('id',1)
-    exe('UPDATE transactions SET category_id=? WHERE id=? AND empresa_id=?',
+    exe('UPDATE transactions SET category_id=%s WHERE id=%s AND empresa_id=%s',
         [d.get('category_id'), tid, eid])
     return jsonify({'ok': True})
 
@@ -469,7 +451,7 @@ def update_tx_category(tid):
 def create_tx_category():
     eid = get_first_empresa(session['user_id'])
     d = request.get_json()
-    exe('INSERT INTO transaction_categories(empresa_id,name,type) VALUES(?,?,?)',
+    exe('INSERT INTO transaction_categories(empresa_id,name,type) VALUES(%s,%s,%s)',
         [eid, d['name'], d.get('type','both')])
     return jsonify({'ok': True}), 201
 
@@ -480,9 +462,9 @@ def dashboard_frontend():
     if not eid: return jsonify({'ingresos':0,'gastos':0,'neto':0,'margen':0,'por_categoria':[],'ultimos':[]})
     month = request.args.get('month')
     year  = request.args.get('year')
-    w = ['empresa_id=?']; p = [eid]
-    if year:  w.append('strftime("%Y",transaction_date)=?');   p.append(year)
-    if month: w.append('strftime("%m",transaction_date)=?');   p.append(str(month).zfill(2))
+    w = ['empresa_id=%s']; p = [eid]
+    if year:  w.append('TO_CHAR(transaction_date::date,'YYYY')=%s');   p.append(year)
+    if month: w.append('TO_CHAR(transaction_date::date,'MM')=%s');   p.append(str(month).zfill(2))
     ws = ' AND '.join(w)
     rows = qry(f'SELECT * FROM transactions WHERE {ws} ORDER BY transaction_date DESC', p)
     ingresos = sum(r['amount'] for r in rows if r['type']=='income')
@@ -557,9 +539,9 @@ def upload_transaction():
     parsed = _json.loads(raw)
     uid = session['user_id']
     exe(
-        "INSERT INTO transactions (empresa_id,type,amount,tax_amount,description,vendor_client,transaction_date,payment_method,source,cif_proveedor,num_factura,local,acreedor) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO transactions (empresa_id,type,amount,tax_amount,description,vendor_client,transaction_date,payment_method,source,cif_proveedor,num_factura,local,acreedor) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
         [empresa_id, tx_type, parsed.get('importe_total', parsed.get('importe',0)), parsed.get('iva',0),
-         request.form.get('filename') or parsed.get('proveedor','Factura'), parsed.get('proveedor',''), parsed.get('fecha', str(datetime.date.today())), 'cash', 'ocr',
+         request.form.get('filename') or parsed.get('proveedor','Factura'), parsed.get('proveedor',''), parsed.get('fecha', str(_dt.date.today())), 'cash', 'ocr',
          parsed.get('cif_proveedor',''), parsed.get('num_factura',''), parsed.get('local','Madrid'), parsed.get('acreedor','Sabores Adelitas SL')]
     )
     return jsonify({'ok': True, 'parsed': parsed})
@@ -575,7 +557,7 @@ if __name__ == '__main__':
 def get_reports():
     eid = get_first_empresa(session['user_id'])
     if not eid: return jsonify([])
-    reports = qry('SELECT * FROM reports WHERE empresa_id=? ORDER BY created_at DESC', [eid])
+    reports = qry('SELECT * FROM reports WHERE empresa_id=%s ORDER BY created_at DESC', [eid])
     return jsonify(reports)
 
 @app.route('/api/reports/generate/<int:year>/<int:month>', methods=['POST'])
@@ -584,7 +566,7 @@ def generate_report(year, month):
     import anthropic
     eid = get_first_empresa(session['user_id'])
     if not eid: return jsonify({'error': 'No empresa'}), 400
-    rows = qry('SELECT * FROM transactions WHERE empresa_id=? AND strftime("%Y",transaction_date)=? AND strftime("%m",transaction_date)=?',
+    rows = qry('SELECT * FROM transactions WHERE empresa_id=%s AND TO_CHAR(transaction_date::date,'YYYY')=%s AND TO_CHAR(transaction_date::date,'MM')=%s',
                [eid, str(year), str(month).zfill(2)])
     ingresos = sum(r['amount'] for r in rows if r['type']=='income')
     gastos   = sum(r['amount'] for r in rows if r['type']=='expense')
@@ -596,7 +578,7 @@ def generate_report(year, month):
         messages=[{"role":"user","content":f"Eres asesor financiero de un restaurante/franquicia español. Datos del mes {month}/{year}:\nIngresos: €{ingresos}\nGastos: €{gastos}\nNeto: €{neto}\nMovimientos:\n{resumen_tx}\n\nEscribe un reporte mensual breve (3-4 párrafos) con: resumen de resultados, análisis, y recomendación de acción concreta. En español, directo y profesional."}]
     )
     texto = msg.content[0].text
-    exe('INSERT INTO reports (empresa_id, year, month, content, income, expenses, created_at) VALUES (?,?,?,?,?,?,datetime("now"))',
+    exe('INSERT INTO reports (empresa_id, year, month, content, income, expenses, created_at) VALUES (%s,%s,%s,%s,%s,%s,datetime("now"))',
         [eid, year, month, texto, ingresos, gastos])
     return jsonify({'ok': True, 'content': texto, 'income': ingresos, 'expenses': gastos, 'month': month, 'year': year, 'created_at': ''})
 
@@ -604,5 +586,5 @@ def generate_report(year, month):
 @login_required
 def delete_all_reports():
     eid = get_first_empresa(session['user_id'])
-    exe('DELETE FROM reports WHERE empresa_id=?', [eid])
+    exe('DELETE FROM reports WHERE empresa_id=%s', [eid])
     return jsonify({'ok': True})
