@@ -144,8 +144,8 @@ def create_local(eid):
 def list_facturas(eid):
     sql = 'SELECT f.*, l.nombre as local_nombre FROM facturas f LEFT JOIN locales l ON f.local_id=l.id WHERE f.empresa_id=%s'
     p = [eid]
-    if request.args.get('year'): sql += " AND TO_CHAR(f.fecha::date,'YYYY')=%s"; p.append(request.args['year'])
-    if request.args.get('month'): sql += " AND TO_CHAR(f.fecha::date,'YYYY-MM')=%s"; p.append(request.args['month'])
+    if request.args.get('year"): sql += " AND TO_CHAR(f.fecha::date,'YYYY')=%s"; p.append(request.args["year'])
+    if request.args.get('month"): sql += " AND TO_CHAR(f.fecha::date,'YYYY-MM')=%s"; p.append(request.args["month'])
     if request.args.get('local_id'): sql += ' AND f.local_id=%s'; p.append(int(request.args['local_id']))
     return jsonify(qry(sql + ' ORDER BY f.fecha DESC', p))
 
@@ -301,8 +301,8 @@ def set_apikey():
 @login_required
 def dashboard(eid):
     w=['f.empresa_id=%s']; p=[eid]
-    if request.args.get('year'): w.append('TO_CHAR(f.fecha::date,'YYYY')=%s'); p.append(request.args['year'])
-    if request.args.get('month'): w.append('TO_CHAR(f.fecha::date,'YYYY-MM')=%s'); p.append(request.args['month'])
+    if request.args.get('year"): w.append("TO_CHAR(f.fecha::date,'YYYY')=%s"); p.append(request.args["year'])
+    if request.args.get('month"): w.append("TO_CHAR(f.fecha::date,'YYYY-MM')=%s"); p.append(request.args["month'])
     if request.args.get('local_id'): w.append('f.local_id=%s'); p.append(int(request.args['local_id']))
     ws = ' AND '.join(w)
     s = qry(f'SELECT COUNT(*) as tf, COALESCE(SUM(base),0) as tb, COALESCE(SUM(iva),0) as ti, COALESCE(SUM(total),0) as tg, COALESCE(SUM(irpf),0) as tr FROM facturas f WHERE {ws}', p, one=True)
@@ -324,7 +324,7 @@ def dashboard(eid):
         'graficos': {
             'por_proveedor': qry(f'SELECT proveedor as nombre, SUM(ABS(total)) as total FROM facturas f WHERE {ws} GROUP BY proveedor ORDER BY total DESC LIMIT 10', p),
             'por_categoria': qry(f'SELECT COALESCE(concepto,"Sin cat") as nombre, SUM(ABS(total)) as total FROM facturas f WHERE {ws} GROUP BY concepto ORDER BY total DESC LIMIT 10', p),
-            'por_mes': qry(f'SELECT TO_CHAR(fecha::date,'YYYY-MM') as mes, SUM(ABS(total)) as total FROM facturas f WHERE {ws} GROUP BY mes ORDER BY mes', p),
+            'por_mes': qry(f"SELECT TO_CHAR(fecha::date,'YYYY-MM') as mes, SUM(ABS(total)) as total FROM facturas f WHERE {ws} GROUP BY mes ORDER BY mes", p),
             'por_local': qry(f'SELECT COALESCE(l.nombre,"Sin local") as nombre, SUM(ABS(f.total)) as total FROM facturas f LEFT JOIN locales l ON f.local_id=l.id WHERE {ws} GROUP BY l.nombre ORDER BY total DESC', p),
         },
         'filtros_disponibles': {
@@ -389,8 +389,8 @@ def list_transactions():
     sql = "SELECT t.*, tc.name as category FROM transactions t LEFT JOIN transaction_categories tc ON t.category_id=tc.id WHERE t.empresa_id=%s"
     args = [eid]
     if d.get('type'):  sql += ' AND t.type=%s';  args.append(d['type'])
-    if d.get('month'): sql += " AND TO_CHAR(t.transaction_date::date,'MM')=%s"; args.append(str(d['month']).zfill(2))
-    if d.get('year'):  sql += " AND TO_CHAR(t.transaction_date::date,'YYYY')=%s"; args.append(str(d['year']))
+    if d.get('month"): sql += " AND TO_CHAR(t.transaction_date::date,'MM')=%s"; args.append(str(d["month']).zfill(2))
+    if d.get('year"):  sql += " AND TO_CHAR(t.transaction_date::date,'YYYY')=%s"; args.append(str(d["year']))
     sql += ' ORDER BY t.transaction_date DESC, t.id DESC'
     return jsonify(qry(sql, args))
 
@@ -463,8 +463,8 @@ def dashboard_frontend():
     month = request.args.get('month')
     year  = request.args.get('year')
     w = ['empresa_id=%s']; p = [eid]
-    if year:  w.append('TO_CHAR(transaction_date::date,'YYYY')=%s');   p.append(year)
-    if month: w.append('TO_CHAR(transaction_date::date,'MM')=%s');   p.append(str(month).zfill(2))
+    if year:  w.append("TO_CHAR(transaction_date::date,'YYYY')=%s");   p.append(year)
+    if month: w.append("TO_CHAR(transaction_date::date,'MM')=%s");   p.append(str(month).zfill(2))
     ws = ' AND '.join(w)
     rows = qry(f'SELECT * FROM transactions WHERE {ws} ORDER BY transaction_date DESC', p)
     ingresos = sum(r['amount'] for r in rows if r['type']=='income')
@@ -566,7 +566,7 @@ def generate_report(year, month):
     import anthropic
     eid = get_first_empresa(session['user_id'])
     if not eid: return jsonify({'error': 'No empresa'}), 400
-    rows = qry('SELECT * FROM transactions WHERE empresa_id=%s AND TO_CHAR(transaction_date::date,'YYYY')=%s AND TO_CHAR(transaction_date::date,'MM')=%s',
+    rows = qry("SELECT * FROM transactions WHERE empresa_id=%s AND TO_CHAR(transaction_date::date,'YYYY')=%s AND TO_CHAR(transaction_date::date,"MM')=%s',
                [eid, str(year), str(month).zfill(2)])
     ingresos = sum(r['amount'] for r in rows if r['type']=='income')
     gastos   = sum(r['amount'] for r in rows if r['type']=='expense')
