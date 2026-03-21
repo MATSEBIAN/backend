@@ -144,8 +144,8 @@ def create_local(eid):
 def list_facturas(eid):
     sql = 'SELECT f.*, l.nombre as local_nombre FROM facturas f LEFT JOIN locales l ON f.local_id=l.id WHERE f.empresa_id=%s'
     p = [eid]
-    if request.args.get('year"): sql += " AND TO_CHAR(f.fecha::date,'YYYY')=%s"; p.append(request.args["year'])
-    if request.args.get('month"): sql += " AND TO_CHAR(f.fecha::date,'YYYY-MM')=%s"; p.append(request.args["month'])
+    if request.args.get('year'): sql += " AND TO_CHAR(f.fecha::date,'YYYY')=%s"; p.append(request.args['year'])
+    if request.args.get('month'): sql += " AND TO_CHAR(f.fecha::date,'YYYY-MM')=%s"; p.append(request.args['month'])
     if request.args.get('local_id'): sql += ' AND f.local_id=%s'; p.append(int(request.args['local_id']))
     return jsonify(qry(sql + ' ORDER BY f.fecha DESC', p))
 
