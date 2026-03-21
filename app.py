@@ -144,8 +144,8 @@ def create_local(eid):
 def list_facturas(eid):
     sql = 'SELECT f.*, l.nombre as local_nombre FROM facturas f LEFT JOIN locales l ON f.local_id=l.id WHERE f.empresa_id=%s'
     p = [eid]
-    if request.args.get('year'): sql += ' AND TO_CHAR(f.fecha::date,'YYYY')=%s'; p.append(request.args['year'])
-    if request.args.get('month'): sql += ' AND TO_CHAR(f.fecha::date,'YYYY-MM')=%s'; p.append(request.args['month'])
+    if request.args.get('year'): sql += " AND TO_CHAR(f.fecha::date,'YYYY')=%s"; p.append(request.args['year'])
+    if request.args.get('month'): sql += " AND TO_CHAR(f.fecha::date,'YYYY-MM')=%s"; p.append(request.args['month'])
     if request.args.get('local_id'): sql += ' AND f.local_id=%s'; p.append(int(request.args['local_id']))
     return jsonify(qry(sql + ' ORDER BY f.fecha DESC', p))
 
@@ -328,8 +328,8 @@ def dashboard(eid):
             'por_local': qry(f'SELECT COALESCE(l.nombre,"Sin local") as nombre, SUM(ABS(f.total)) as total FROM facturas f LEFT JOIN locales l ON f.local_id=l.id WHERE {ws} GROUP BY l.nombre ORDER BY total DESC', p),
         },
         'filtros_disponibles': {
-            'years': [r['y'] for r in qry('SELECT DISTINCT TO_CHAR(fecha::date,'YYYY') as y FROM facturas WHERE empresa_id=%s ORDER BY y', [eid])],
-            'months': [r['m'] for r in qry('SELECT DISTINCT TO_CHAR(fecha::date,'YYYY-MM') as m FROM facturas WHERE empresa_id=%s ORDER BY m', [eid])],
+            'years': [r['y'] for r in qry("SELECT DISTINCT TO_CHAR(fecha::date,'YYYY') as y FROM facturas WHERE empresa_id=%s ORDER BY y", [eid])],
+            'months': [r['m'] for r in qry("SELECT DISTINCT TO_CHAR(fecha::date,'YYYY-MM') as m FROM facturas WHERE empresa_id=%s ORDER BY m", [eid])],
             'locales': qry('SELECT id, nombre FROM locales WHERE empresa_id=%s AND activo=1', [eid])
         }
     })
