@@ -514,6 +514,44 @@ def dashboard_frontend():
 init_db()
 
 
+@app.route('/api/ocr', methods=['POST'])
+def ocr_simple():
+    import anthropic, base64, re, json as _json
+    if not ANTHROPIC_API_KEY:
+        return jsonify({'error': 'Sin API key'}), 400
+    d = request.get_json()
+    img = d.get('image', '')
+    empresa_id = d.get('empresa_id', 1)
+    if ',' in img: img = img.split(',')[1]
+    mt = d.get('media_type', 'image/jpeg')
+    if mt == 'application/pdf':
+        content_block = {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": img}}
+    else:
+        content_block = {"type": "image", "source": {"type": "base64", "media_type": mt, "data": img}}
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    msg = client.messages.create(
+        model='claude-opus-4-5', max_tokens=512,
+        messages=[{"role":"user","content":[content_block,
+            {"type":"text","text":"Analiza esta factura y extrae en JSON: {fecha: YYYY-MM-DD, proveedor: texto, cif_proveedor: texto, num_factura: texto, base: numero, iva: numero, irpf: numero, total: numero, local_nombre: ciudad entrega, concepto: categoria, notas: texto}. Solo JSON, sin markdown."}
+        ]}]
+    )
+    raw = msg.content[0].text.strip()
+    raw = re.sub(r"^```json|^```|```$", "", raw, flags=re.MULTILINE).strip()
+    parsed = _json.loads(raw)
+    locales = qry('SELECT * FROM locales WHERE empresa_id=%s AND activo=1', [empresa_id])
+    local_id = None
+    loc_raw = str(parsed.get('local_nombre') or '').strip().upper()
+    for l in locales:
+        if l['nombre'].upper() in loc_raw or loc_raw in l['nombre'].upper():
+            local_id = l['id']; break
+    fid = exe('INSERT INTO facturas(empresa_id,local_id,fecha,num_factura,proveedor,cif_proveedor,concepto,base,iva,irpf,total,origen) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)',
+        [empresa_id, local_id, parsed.get('fecha'), parsed.get('num_factura'),
+         parsed.get('proveedor','?'), parsed.get('cif_proveedor'),
+         parsed.get('concepto'), float(parsed.get('base',0)), float(parsed.get('iva',0)),
+         float(parsed.get('irpf',0)), float(parsed.get('total',0)), 'ocr'])
+    return jsonify({'ok': True, 'factura': parsed, 'id': fid})
+
+
 @app.route('/api/transactions/upload', methods=['POST'])
 @login_required
 def upload_transaction():
