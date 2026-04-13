@@ -514,8 +514,10 @@ def dashboard_frontend():
 init_db()
 
 
-@app.route('/api/ocr', methods=['POST'])
+@app.route('/api/ocr', methods=['POST', 'OPTIONS'])
 def ocr_simple():
+    if request.method == 'OPTIONS':
+        return '', 204
     import anthropic, base64, re, json as _json
     if not ANTHROPIC_API_KEY:
         return jsonify({'error': 'Sin API key'}), 400
