@@ -57,6 +57,15 @@ def exe(sql, args=()):
 # === CORS manual ===
 @app.after_request
 def cors(r):
+    origin = request.headers.get('Origin', '')
+    if not origin or origin == 'null':
+        r.headers['Access-Control-Allow-Origin'] = '*'
+    else:
+        r.headers['Access-Control-Allow-Origin'] = origin
+        r.headers['Access-Control-Allow-Credentials'] = 'true'
+    r.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Empresa-ID'
+    r.headers['Access-Control-Allow-Methods'] = 'GET,POST,PUT,DELETE,OPTIONS,PATCH'
+    return r
     origin = request.headers.get('Origin', '*')
     r.headers['Access-Control-Allow-Origin'] = '*' if not origin or origin == 'null' else origin
     r.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
