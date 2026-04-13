@@ -520,7 +520,7 @@ def ocr_simple():
     if not ANTHROPIC_API_KEY:
         return jsonify({'error': 'Sin API key'}), 400
     d = request.get_json()
-    img = d.get('image', '')
+    img = d.get('image', '') or d.get('base64_data', '')
     empresa_id = d.get('empresa_id', 1)
     if ',' in img: img = img.split(',')[1]
     mt = d.get('media_type', 'image/jpeg')
